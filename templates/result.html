@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Верификация · {{ code }}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 36px 32px;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+    }
+    .session-badge {
+      display: inline-block;
+      background: #ede9fe;
+      color: #5b21b6;
+      font-size: .8rem;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 20px;
+      margin-bottom: 20px;
+      letter-spacing: 2px;
+    }
+    h1 { font-size: 1.3rem; color: #111; margin-bottom: 8px }
+    .sub { color: #777; font-size: .9rem; margin-bottom: 28px; line-height: 1.5 }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      border: 1.5px solid #e5e5e5;
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font-size: .9rem;
+      color: #555;
+      font-weight: 500;
+      transition: all .15s;
+      text-align: center;
+    }
+    .tab.active {
+      border-color: #4f46e5;
+      background: #f5f3ff;
+      color: #4f46e5;
+    }
+    .panel { display: none }
+    .panel.active { display: block }
+
+    label { display: block; font-size: .85rem; color: #555; margin-bottom: 6px; font-weight: 500 }
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1.5px solid #ddd;
+      border-radius: 10px;
+      font-size: 1rem;
+      margin-bottom: 16px;
+      transition: border .15s;
+    }
+    input:focus { outline: none; border-color: #4f46e5 }
+    .otp-input {
+      font-size: 2rem;
+      letter-spacing: 10px;
+      text-align: center;
+      font-weight: 700;
+    }
+    .btn {
+      width: 100%;
+      padding: 14px;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn:hover { background: #4338ca }
+    .btn:disabled { background: #a5b4fc; cursor: default }
+
+    .alert {
+      padding: 14px 16px;
+      border-radius: 10px;
+      margin-top: 16px;
+      font-size: .9rem;
+      display: none;
+    }
+    .alert.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca }
+    .alert.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0 }
+
+    .cert-hint {
+      background: #f8f8f8;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: .8rem;
+      color: #666;
+      margin-bottom: 16px;
+      line-height: 1.6;
+    }
+    textarea {
+      width: 100%;
+      padding: 12px;
+      border: 1.5px solid #ddd;
+      border-radius: 10px;
+      font-family: monospace;
+      font-size: .8rem;
+      resize: vertical;
+      min-height: 100px;
+      margin-bottom: 16px;
+    }
+    textarea:focus { outline: none; border-color: #4f46e5 }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="session-badge">{{ code }}</div>
+  <h1>Подтвердите личность</h1>
+  <p class="sub">Выберите метод верификации. После подтверждения вы увидите статус обеих сторон.</p>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('totp')">📱 Google Auth</div>
+    <div class="tab" onclick="switchTab('cert')">🔑 Сертификат</div>
+  </div>
+
+  <!-- TOTP панель -->
+  <div class="panel active" id="panel-totp">
+    <label>Ваш ID пользователя</label>
+    <input id="totp-userid" type="text" placeholder="например: alice-001">
+
+    <label>Код из Google Authenticator</label>
+    <input id="totp-code" type="text" inputmode="numeric"
+           maxlength="6" placeholder="000000" class="otp-input"
+           oninput="if(this.value.length===6) document.getElementById('btn-totp').focus()">
+
+    <button class="btn" id="btn-totp" onclick="verifyTOTP()">Верифицироваться</button>
+  </div>
+
+  <!-- Cert панель -->
+  <div class="panel" id="panel-cert">
+    <div class="cert-hint">
+      Для верификации через сертификат вам нужен приватный ключ (<code>bob.key</code>)
+      и сертификат (<code>bob.crt</code>), выданный при встрече.
+    </div>
+
+    <label>Ваш ID пользователя</label>
+    <input id="cert-userid" type="text" placeholder="например: bob-001">
+
+    <label>Содержимое вашего сертификата (.crt)</label>
+    <textarea id="cert-pem" placeholder="-----BEGIN CERTIFICATE-----
+...
+-----END CERTIFICATE-----"></textarea>
+
+    <label>Содержимое вашего приватного ключа (.key)</label>
+    <textarea id="cert-key" placeholder="-----BEGIN RSA PRIVATE KEY-----
+...
+-----END RSA PRIVATE KEY-----"></textarea>
+
+    <button class="btn" onclick="verifyCert()">Верифицироваться</button>
+  </div>
+
+  <div class="alert" id="alert"></div>
+</div>
+
+<script>
+  const CODE = "{{ code }}"
+
+  function switchTab(name) {
+    document.querySelectorAll('.tab').forEach((t, i) => {
+      t.classList.toggle('active', (i === 0 && name === 'totp') || (i === 1 && name === 'cert'))
+    })
+    document.getElementById('panel-totp').classList.toggle('active', name === 'totp')
+    document.getElementById('panel-cert').classList.toggle('active', name === 'cert')
+  }
+
+  function showAlert(msg, type) {
+    const el = document.getElementById('alert')
+    el.textContent = msg
+    el.className = `alert ${type}`
+    el.style.display = 'block'
+  }
+
+  // ── TOTP верификация ──────────────────────────────────────
+
+  async function verifyTOTP() {
+    const userId = document.getElementById('totp-userid').value.trim()
+    const code   = document.getElementById('totp-code').value.trim()
+
+    if (!userId) { showAlert('Введите ваш ID', 'error'); return }
+    if (code.length !== 6) { showAlert('Код должен быть 6 цифр', 'error'); return }
+
+    const btn = document.getElementById('btn-totp')
+    btn.disabled = true
+    btn.textContent = 'Проверяем...'
+
+    const res  = await fetch(`/api/session/${CODE}/verify/totp`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ user_id: userId, code })
+    })
+    const data = await res.json()
+
+    if (data.ok) {
+      showAlert(`✅ Вы верифицированы как «${data.name}»`, 'success')
+      setTimeout(() => location.href = `/result/${CODE}`, 1200)
+    } else {
+      showAlert('❌ ' + data.reason, 'error')
+      btn.disabled = false
+      btn.textContent = 'Верифицироваться'
+    }
+  }
+
+  // ── Cert верификация ──────────────────────────────────────
+
+  async function verifyCert() {
+    const userId  = document.getElementById('cert-userid').value.trim()
+    const certPem = document.getElementById('cert-pem').value.trim()
+    const keyPem  = document.getElementById('cert-key').value.trim()
+
+    if (!userId || !certPem || !keyPem) {
+      showAlert('Заполните все поля', 'error'); return
+    }
+
+    // Получаем nonce
+    const { nonce } = await fetch('/api/nonce').then(r => r.json())
+
+    // Подписываем nonce приватным ключом через SubtleCrypto
+    let signatureB64
+    try {
+      // Импортируем приватный ключ из PEM
+      const keyDer = pemToDer(keyPem)
+      const privateKey = await crypto.subtle.importKey(
+        'pkcs8', keyDer,
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false, ['sign']
+      )
+      const sig = await crypto.subtle.sign(
+        'RSASSA-PKCS1-v1_5',
+        privateKey,
+        new TextEncoder().encode(nonce)
+      )
+      signatureB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
+    } catch (e) {
+      showAlert('Ошибка ключа: ' + e.message, 'error'); return
+    }
+
+    const res  = await fetch(`/api/session/${CODE}/verify/cert`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ user_id: userId, cert_pem: certPem, nonce, signature_b64: signatureB64 })
+    })
+    const data = await res.json()
+
+    if (data.ok) {
+      showAlert(`✅ Вы верифицированы как «${data.name}»`, 'success')
+      setTimeout(() => location.href = `/result/${CODE}`, 1200)
+    } else {
+      showAlert('❌ ' + data.reason, 'error')
+    }
+  }
+
+  // Конвертация PEM → ArrayBuffer
+  function pemToDer(pem) {
+    const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')
+    const bin = atob(b64)
+    const buf = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+    return buf.buffer
+  }
+</script>
+</body>
+</html>

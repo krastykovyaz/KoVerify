@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Установить сертификат — {{ name }}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f0f1a;
+      color: #d0d0e8;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+    .wrap { max-width: 480px; margin: 0 auto }
+
+    .header { text-align: center; margin-bottom: 28px }
+    .header .icon { font-size: 3rem; margin-bottom: 10px }
+    .header h1 { font-size: 1.3rem; color: #e0e0f0 }
+    .header p  { color: #666; font-size: .9rem; margin-top: 6px }
+
+    .card {
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 14px;
+      padding: 22px;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      font-size: .75rem;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 14px;
+    }
+
+    /* Platform tabs */
+    .platform-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .platform-tab {
+      flex: 1;
+      min-width: 70px;
+      padding: 10px 8px;
+      border: 1.5px solid #2d2d4e;
+      border-radius: 10px;
+      background: #0f0f1a;
+      color: #888;
+      font-size: .82rem;
+      cursor: pointer;
+      text-align: center;
+      transition: all .15s;
+    }
+    .platform-tab .tab-icon { font-size: 1.4rem; display: block; margin-bottom: 4px }
+    .platform-tab.active {
+      border-color: #5b4fe9;
+      background: #1e1a3e;
+      color: #a090ff;
+    }
+
+    /* Instructions */
+    .platform-content { display: none }
+    .platform-content.active { display: block }
+
+    .steps { list-style: none; counter-reset: step }
+    .steps li {
+      counter-increment: step;
+      display: flex;
+      gap: 12px;
+      margin-bottom: 14px;
+      font-size: .88rem;
+      line-height: 1.5;
+      color: #b0b0d0;
+    }
+    .steps li::before {
+      content: counter(step);
+      flex-shrink: 0;
+      width: 24px; height: 24px;
+      background: #5b4fe9;
+      color: #fff;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .75rem;
+      font-weight: 700;
+      margin-top: 1px;
+    }
+    .steps li code {
+      background: #0f0f1a;
+      border: 1px solid #2d2d4e;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: .82rem;
+      color: #a0e0a0;
+    }
+
+    .btn-download {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      background: #5b4fe9;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      text-decoration: none;
+      margin-bottom: 10px;
+      transition: opacity .15s;
+    }
+    .btn-download:hover { opacity: .85 }
+    .btn-secondary {
+      background: #1e1e38;
+      color: #a0a0c0;
+      border: 1px solid #2d2d4e;
+    }
+
+    /* TOTP section */
+    .qr-center { text-align: center; margin-bottom: 14px }
+    .qr-center img {
+      width: 160px; height: 160px;
+      background: #fff;
+      padding: 6px;
+      border-radius: 8px;
+    }
+    .secret-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #0f0f1a;
+      border: 1px solid #2d2d4e;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: monospace;
+      font-size: .88rem;
+      color: #a0e0a0;
+      letter-spacing: 2px;
+    }
+    .secret-row button {
+      margin-left: auto;
+      background: #2d2d4e;
+      border: none;
+      border-radius: 5px;
+      padding: 4px 10px;
+      font-size: .75rem;
+      color: #a0a0c0;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .warning {
+      background: #431407;
+      border: 1px solid #7c2d12;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: .82rem;
+      color: #fdba74;
+      line-height: 1.5;
+      margin-top: 10px;
+    }
+    .success-note {
+      background: #14532d;
+      border: 1px solid #166534;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: .82rem;
+      color: #86efac;
+      text-align: center;
+      margin-top: 14px;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="header">
+    <div class="icon">🔐</div>
+    <h1>Привет, {{ name }}!</h1>
+    <p>Установите сертификат на устройство — это займёт 1 минуту</p>
+  </div>
+
+  <!-- Platform selector — автоопределение -->
+  <div class="platform-tabs">
+    <div class="platform-tab" id="tab-ios" onclick="switchPlatform('ios')">
+      <span class="tab-icon">📱</span>iPhone / iPad
+    </div>
+    <div class="platform-tab" id="tab-android" onclick="switchPlatform('android')">
+      <span class="tab-icon">🤖</span>Android
+    </div>
+    <div class="platform-tab" id="tab-mac" onclick="switchPlatform('mac')">
+      <span class="tab-icon">💻</span>macOS
+    </div>
+    <div class="platform-tab" id="tab-win" onclick="switchPlatform('win')">
+      <span class="tab-icon">🪟</span>Windows
+    </div>
+  </div>
+
+  <!-- iOS -->
+  <div class="platform-content" id="content-ios">
+    <div class="card">
+      <div class="card-title">Установка на iPhone / iPad</div>
+      <ol class="steps">
+        <li>Нажмите кнопку ниже — скачается файл <code>.mobileconfig</code></li>
+        <li>iOS спросит: <em>«Профиль загружен»</em> → нажмите <em>Закрыть</em></li>
+        <li>Откройте <strong>Настройки → Профиль загружен</strong> (вверху)</li>
+        <li>Нажмите <em>Установить</em> → введите пароль устройства</li>
+        <li>Сертификат появится в <em>Настройки → Основные → VPN и управление устройством</em></li>
+        <li>Готово — Safari будет использовать его автоматически при верификации</li>
+      </ol>
+      <a class="btn-download" href="/download/{{ token }}/mobileconfig">
+        ⬇ Скачать профиль для iOS (.mobileconfig)
+      </a>
+      <div class="warning">
+        ⚠ Пароль от .p12 администратор назвал вам устно при встрече.
+        Введите его когда iOS попросит.
+      </div>
+    </div>
+  </div>
+
+  <!-- Android -->
+  <div class="platform-content" id="content-android">
+    <div class="card">
+      <div class="card-title">Установка на Android</div>
+      <ol class="steps">
+        <li>Нажмите кнопку ниже — скачается файл <code>.p12</code></li>
+        <li>Откройте файл из уведомления (или из папки Загрузки)</li>
+        <li>Android спросит название сертификата — введите любое, например <code>Verifier</code></li>
+        <li>Введите пароль от .p12 (администратор сказал устно)</li>
+        <li>Выберите <em>«Для VPN и приложений»</em> или <em>«Wi-Fi сертификат»</em></li>
+        <li>Chrome будет предлагать его при верификации автоматически</li>
+      </ol>
+      <a class="btn-download" href="/download/{{ token }}/p12">
+        ⬇ Скачать сертификат (.p12)
+      </a>
+      <div class="warning">
+        ℹ На некоторых Android нужно идти в <em>Настройки → Безопасность → Установить сертификат</em>
+        и выбрать скачанный .p12 вручную.
+      </div>
+    </div>
+  </div>
+
+  <!-- macOS -->
+  <div class="platform-content" id="content-mac">
+    <div class="card">
+      <div class="card-title">Установка на macOS (Safari / Chrome)</div>
+      <ol class="steps">
+        <li>Нажмите кнопку ниже — скачается <code>.p12</code></li>
+        <li>Откройте файл — запустится <em>Связка ключей (Keychain Access)</em></li>
+        <li>Введите пароль от .p12 (администратор сказал устно)</li>
+        <li>Сертификат появится в разделе <em>Мои сертификаты</em></li>
+        <li>Safari и Chrome подхватят его автоматически</li>
+      </ol>
+      <a class="btn-download" href="/download/{{ token }}/p12">
+        ⬇ Скачать сертификат (.p12)
+      </a>
+    </div>
+  </div>
+
+  <!-- Windows -->
+  <div class="platform-content" id="content-win">
+    <div class="card">
+      <div class="card-title">Установка на Windows (Chrome / Edge)</div>
+      <ol class="steps">
+        <li>Нажмите кнопку ниже — скачается <code>.p12</code></li>
+        <li>Дважды кликните по файлу → Мастер импорта сертификатов</li>
+        <li>Хранилище: <em>«Текущий пользователь»</em> → Далее</li>
+        <li>Введите пароль от .p12</li>
+        <li>Хранилище: <em>«Автоматически»</em> → Готово</li>
+        <li>Chrome и Edge увидят сертификат автоматически</li>
+      </ol>
+      <a class="btn-download" href="/download/{{ token }}/p12">
+        ⬇ Скачать сертификат (.p12)
+      </a>
+      <div class="warning">
+        ℹ Firefox использует собственное хранилище. Для Firefox:
+        Настройки → Конфиденциальность → Просмотр сертификатов → Импорт.
+      </div>
+    </div>
+  </div>
+
+  <!-- TOTP раздел — одинаков для всех платформ -->
+  <div class="card">
+    <div class="card-title">Google Authenticator (резервный метод)</div>
+    <p style="font-size:.82rem;color:#666;margin-bottom:14px;line-height:1.5">
+      Отсканируйте QR-код в приложении Google Authenticator, Aegis или любом другом TOTP-приложении.
+      Это резервный способ верификации если браузер не подхватит сертификат.
+    </p>
+    <div class="qr-center">
+      <img src="data:image/png;base64,{{ qr_totp_b64 }}" alt="QR для TOTP">
+    </div>
+    <p style="font-size:.78rem;color:#555;text-align:center;margin-bottom:10px">
+      Или введите секрет вручную:
+    </p>
+    <div class="secret-row">
+      <span id="totp-secret">{{ totp_secret }}</span>
+      <button onclick="copySecret()">копировать</button>
+    </div>
+  </div>
+
+  <div class="success-note">
+    ✓ После установки закройте эту страницу.<br>
+    Ссылка одноразовая — повторно открыть нельзя.
+  </div>
+
+</div>
+
+<script>
+  // Автоопределение платформы
+  function detectPlatform() {
+    const ua = navigator.userAgent
+    if (/iPhone|iPad|iPod/.test(ua))   return 'ios'
+    if (/Android/.test(ua))            return 'android'
+    if (/Mac OS X/.test(ua))           return 'mac'
+    return 'win'
+  }
+
+  function switchPlatform(name) {
+    document.querySelectorAll('.platform-tab').forEach(t =>
+      t.classList.toggle('active', t.id === `tab-${name}`)
+    )
+    document.querySelectorAll('.platform-content').forEach(c =>
+      c.classList.toggle('active', c.id === `content-${name}`)
+    )
+  }
+
+  // Автоматически показываем нужную платформу
+  switchPlatform(detectPlatform())
+
+  function copySecret() {
+    const text = document.getElementById('totp-secret').textContent
+    navigator.clipboard.writeText(text)
+    event.target.textContent = '✓'
+    setTimeout(() => event.target.textContent = 'копировать', 1500)
+  }
+</script>
+</body>
+</html>

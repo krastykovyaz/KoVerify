@@ -1,0 +1,5 @@
+flask
+cryptography>=38
+pyotp
+qrcode[pil]
+gunicorn

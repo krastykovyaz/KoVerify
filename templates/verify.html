@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Верификация · {{ code }}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+    }
+    .card {
+      background: #fff; border-radius: 16px; padding: 36px 32px;
+      max-width: 420px; width: 100%;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+    }
+    .badge {
+      display: inline-block; background: #ede9fe; color: #5b21b6;
+      font-size: .8rem; font-weight: 600; padding: 4px 12px;
+      border-radius: 20px; margin-bottom: 20px; letter-spacing: 2px;
+    }
+    h1 { font-size: 1.2rem; color: #111; margin-bottom: 6px }
+    .sub { color: #777; font-size: .85rem; margin-bottom: 28px; line-height: 1.5 }
+
+    /* Главная кнопка — сертификат */
+    .btn-cert {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      width: 100%; padding: 18px;
+      background: #4f46e5; color: #fff;
+      border: none; border-radius: 12px;
+      font-size: 1.05rem; font-weight: 600; cursor: pointer;
+      transition: background .15s; margin-bottom: 8px;
+    }
+    .btn-cert:hover { background: #4338ca }
+    .btn-cert:disabled { background: #a5b4fc; cursor: default }
+    .btn-cert-icon { font-size: 1.4rem }
+    .btn-hint {
+      text-align: center; font-size: .78rem; color: #bbb; margin-bottom: 24px;
+    }
+
+    .divider {
+      display: flex; align-items: center; gap: 10px;
+      color: #ccc; font-size: .8rem; margin-bottom: 20px;
+    }
+    .divider::before, .divider::after {
+      content: ''; flex: 1; height: 1px; background: #e5e5e5;
+    }
+
+    /* TOTP fallback */
+    .totp-block { background: #f9f9f9; border-radius: 10px; padding: 18px }
+    .totp-title { font-size: .82rem; color: #888; margin-bottom: 12px; font-weight: 500 }
+    label { display: block; font-size: .82rem; color: #666; margin-bottom: 5px }
+    input {
+      width: 100%; padding: 11px 13px;
+      border: 1.5px solid #ddd; border-radius: 9px;
+      font-size: .95rem; margin-bottom: 12px; transition: border .15s;
+    }
+    input:focus { outline: none; border-color: #4f46e5 }
+    .otp-input { font-size: 1.8rem; letter-spacing: 8px; text-align: center; font-weight: 700 }
+    .btn-totp {
+      width: 100%; padding: 12px; background: #6366f1; color: #fff;
+      border: none; border-radius: 9px; font-size: .95rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-totp:hover { background: #4f46e5 }
+    .btn-totp:disabled { background: #a5b4fc; cursor: default }
+
+    /* Alerts */
+    .alert {
+      padding: 14px 16px; border-radius: 10px;
+      margin-top: 16px; font-size: .88rem; display: none; line-height: 1.5;
+    }
+    .alert.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca }
+    .alert.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0 }
+    .alert.info    { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe }
+
+    /* Состояние загрузки */
+    .spinner {
+      display: inline-block; width: 18px; height: 18px;
+      border: 2px solid rgba(255,255,255,.4);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin .7s linear infinite; vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg) } }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="badge">{{ code }}</div>
+  <h1>Подтвердите личность</h1>
+  <p class="sub">
+    Если вы установили сертификат при встрече — нажмите кнопку.<br>
+    Браузер автоматически подставит его из хранилища устройства.
+  </p>
+
+  <!-- ГЛАВНЫЙ МЕТОД: сертификат с устройства (mTLS) -->
+  <button class="btn-cert" id="btn-cert" onclick="verifyWithCert()">
+    <span class="btn-cert-icon">🔐</span>
+    <span id="btn-cert-text">Войти с сертификатом устройства</span>
+  </button>
+  <p class="btn-hint">Браузер предложит выбрать сертификат — выберите «Verifier»</p>
+
+  <!-- РЕЗЕРВНЫЙ МЕТОД: TOTP -->
+  <div class="divider">резервный метод</div>
+  <div class="totp-block">
+    <div class="totp-title">📱 Код из Google Authenticator</div>
+    <label>Ваш ID</label>
+    <input id="totp-userid" type="text" placeholder="alice-001" autocomplete="username">
+    <label>Код (6 цифр)</label>
+    <input id="totp-code" type="text" inputmode="numeric" maxlength="6"
+           placeholder="000000" class="otp-input" autocomplete="one-time-code">
+    <button class="btn-totp" id="btn-totp" onclick="verifyWithTOTP()">
+      Войти по коду
+    </button>
+  </div>
+
+  <div class="alert" id="alert"></div>
+</div>
+
+<script>
+  const CODE = "{{ code }}"
+
+  function showAlert(msg, type) {
+    const el = document.getElementById('alert')
+    el.innerHTML = msg
+    el.className = `alert ${type}`
+    el.style.display = 'block'
+  }
+
+  // ── Сертификат с устройства (mTLS) ───────────────────────
+  async function verifyWithCert() {
+    const btn  = document.getElementById('btn-cert')
+    const text = document.getElementById('btn-cert-text')
+    btn.disabled = true
+    text.innerHTML = '<span class="spinner"></span> Запрашиваем сертификат...'
+    showAlert('Браузер запрашивает сертификат с устройства...', 'info')
+
+    try {
+      const res  = await fetch(`/api/session/${CODE}/verify/mtls`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      })
+      const data = await res.json()
+
+      if (data.ok) {
+        showAlert(`✅ Верифицированы как <strong>${data.name}</strong>`, 'success')
+        setTimeout(() => location.href = `/result/${CODE}`, 1000)
+      } else if (data.reason && data.reason.includes('не предоставлен')) {
+        showAlert(
+          `⚠️ Сертификат не найден на устройстве.<br><br>` +
+          `Убедитесь что:<br>` +
+          `• Вы установили .p12 / .mobileconfig при встрече<br>` +
+          `• Используете HTTPS (не http://)<br>` +
+          `• Браузер имеет доступ к хранилищу сертификатов<br><br>` +
+          `Или используйте Google Authenticator ниже.`,
+          'error'
+        )
+        btn.disabled = false
+        text.textContent = 'Войти с сертификатом устройства'
+      } else {
+        showAlert('❌ ' + (data.reason || 'Ошибка'), 'error')
+        btn.disabled = false
+        text.textContent = 'Войти с сертификатом устройства'
+      }
+    } catch (e) {
+      showAlert('❌ Ошибка сети: ' + e.message, 'error')
+      btn.disabled = false
+      text.textContent = 'Войти с сертификатом устройства'
+    }
+  }
+
+  // ── TOTP (резерв) ─────────────────────────────────────────
+  async function verifyWithTOTP() {
+    const userId = document.getElementById('totp-userid').value.trim()
+    const code   = document.getElementById('totp-code').value.trim()
+    if (!userId) { showAlert('Введите ваш ID', 'error'); return }
+    if (code.length !== 6) { showAlert('Код — 6 цифр', 'error'); return }
+
+    const btn = document.getElementById('btn-totp')
+    btn.disabled = true
+    btn.textContent = 'Проверяем...'
+
+    try {
+      const res  = await fetch(`/api/session/${CODE}/verify/totp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, code })
+      })
+      const data = await res.json()
+
+      if (data.ok) {
+        showAlert(`✅ Верифицированы как <strong>${data.name}</strong>`, 'success')
+        setTimeout(() => location.href = `/result/${CODE}`, 1000)
+      } else {
+        showAlert('❌ ' + data.reason, 'error')
+        btn.disabled = false
+        btn.textContent = 'Войти по коду'
+      }
+    } catch (e) {
+      showAlert('❌ Ошибка: ' + e.message, 'error')
+      btn.disabled = false
+      btn.textContent = 'Войти по коду'
+    }
+  }
+
+  // Автоввод кода при 6 цифрах
+  document.getElementById('totp-code').addEventListener('input', function() {
+    if (this.value.length === 6) verifyWithTOTP()
+  })
+</script>
+</body>
+</html>

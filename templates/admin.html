@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Панель управления</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f0f1a;
+      color: #d0d0e8;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+
+    /* Layout */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      max-width: 960px;
+      margin: 0 auto 28px;
+    }
+    .topbar h1 { font-size: 1.2rem; color: #e0e0f0 }
+    .topbar-actions { display: flex; gap: 10px; align-items: center }
+
+    .main { max-width: 960px; margin: 0 auto; display: grid;
+            grid-template-columns: 360px 1fr; gap: 20px }
+
+    @media (max-width: 700px) {
+      .main { grid-template-columns: 1fr }
+    }
+
+    /* Cards */
+    .card {
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 14px;
+      padding: 24px;
+    }
+    .card-title {
+      font-size: .9rem;
+      font-weight: 600;
+      color: #a0a0c0;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 20px;
+    }
+
+    /* Form */
+    label { display: block; font-size: .82rem; color: #777; margin-bottom: 5px }
+    input[type=text] {
+      width: 100%;
+      padding: 11px 13px;
+      background: #0f0f1a;
+      border: 1.5px solid #2d2d4e;
+      border-radius: 9px;
+      font-size: .95rem;
+      color: #e0e0f0;
+      margin-bottom: 14px;
+      transition: border .15s;
+    }
+    input[type=text]:focus { outline: none; border-color: #5b4fe9 }
+    .btn {
+      padding: 11px 20px;
+      border: none;
+      border-radius: 9px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .btn:hover { opacity: .85 }
+    .btn-primary   { background: #5b4fe9; color: #fff; width: 100% }
+    .btn-sm        { padding: 5px 12px; font-size: .78rem }
+    .btn-danger    { background: #7f1d1d; color: #fca5a5 }
+    .btn-restore   { background: #14532d; color: #86efac }
+    .btn-ghost     { background: #1e1e38; color: #a0a0c0; border: 1px solid #2d2d4e }
+    .btn-logout    { background: transparent; color: #666;
+                     border: 1px solid #2d2d4e; padding: 7px 14px; font-size: .82rem }
+
+    /* CA status */
+    .ca-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: .8rem;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+    .ca-ok  { background: #14532d; color: #86efac }
+    .ca-err { background: #7f1d1d; color: #fca5a5 }
+
+    /* Users table */
+    .users-list { display: flex; flex-direction: column; gap: 10px }
+    .user-row {
+      background: #0f0f1a;
+      border: 1px solid #2d2d4e;
+      border-radius: 10px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .user-row.revoked { opacity: .5 }
+    .user-avatar {
+      width: 38px; height: 38px;
+      background: #5b4fe9;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 1rem;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .user-info { flex: 1; min-width: 0 }
+    .user-name { font-weight: 600; color: #e0e0f0; font-size: .95rem }
+    .user-id   { font-size: .75rem; color: #666; font-family: monospace; margin-top: 2px }
+    .user-meta { font-size: .72rem; color: #555; margin-top: 3px }
+    .user-actions { display: flex; gap: 6px; flex-shrink: 0 }
+
+    .badge-rev {
+      display: inline-block;
+      background: #7f1d1d;
+      color: #fca5a5;
+      font-size: .7rem;
+      padding: 2px 8px;
+      border-radius: 20px;
+      margin-left: 6px;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.75);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-overlay.open { display: flex }
+    .modal {
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 16px;
+      padding: 28px;
+      max-width: 520px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal h2 { font-size: 1.1rem; color: #e0e0f0; margin-bottom: 20px }
+
+    /* Credentials block */
+    .cred-section { margin-bottom: 20px }
+    .cred-label {
+      font-size: .75rem;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+    .qr-wrap { text-align: center; margin-bottom: 12px }
+    .qr-wrap img { width: 180px; height: 180px; border-radius: 8px; background: #fff; padding: 6px }
+
+    .secret-box {
+      background: #0f0f1a;
+      border: 1px solid #2d2d4e;
+      border-radius: 8px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: .82rem;
+      color: #a0e0a0;
+      word-break: break-all;
+      position: relative;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 8px; right: 8px;
+      background: #2d2d4e;
+      border: none;
+      border-radius: 5px;
+      padding: 3px 8px;
+      font-size: .72rem;
+      color: #a0a0c0;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: #3d3d6e }
+
+    .key-box {
+      background: #0f0f1a;
+      border: 1px solid #2d2d4e;
+      border-radius: 8px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: .72rem;
+      color: #f0a060;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 140px;
+      overflow-y: auto;
+      position: relative;
+    }
+
+    .warning-box {
+      background: #431407;
+      border: 1px solid #7c2d12;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: .82rem;
+      color: #fdba74;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+
+    .modal-actions { display: flex; gap: 10px; margin-top: 20px }
+    .btn-download {
+      flex: 1;
+      background: #1e3a5f;
+      color: #93c5fd;
+      border: 1px solid #1d4ed8;
+      text-align: center;
+    }
+    .btn-close-modal {
+      flex: 1;
+      background: #1e1e38;
+      color: #a0a0c0;
+      border: 1px solid #2d2d4e;
+    }
+
+    .empty { color: #444; font-size: .9rem; text-align: center; padding: 32px }
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🔐 Панель управления верификатором</h1>
+  <div class="topbar-actions">
+    <a href="/" style="color:#666;font-size:.82rem;text-decoration:none">← Сайт</a>
+    <a href="/admin/logout"><button class="btn btn-logout">Выйти</button></a>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- Левая колонка: регистрация + CA -->
+  <div>
+
+    <!-- CA статус -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">Корневой сертификат (CA)</div>
+
+      {% if ca_ok %}
+        <div class="ca-badge ca-ok">✓ CA инициализирован</div>
+        <p style="font-size:.82rem;color:#666;margin-bottom:14px">
+          Публичный сертификат CA нужно передать всем участникам при встрече
+          или разместить на сайте.
+        </p>
+        <a href="/admin/api/ca-cert">
+          <button class="btn btn-ghost" style="width:100%">⬇ Скачать ca.crt</button>
+        </a>
+      {% else %}
+        <div class="ca-badge ca-err">✗ CA не создан</div>
+        <p style="font-size:.82rem;color:#666;margin-bottom:14px">
+          Без CA невозможно выпускать сертификаты.
+        </p>
+        <button class="btn btn-primary" onclick="initCA()">Создать CA</button>
+      {% endif %}
+    </div>
+
+    <!-- Регистрация нового пользователя -->
+    <div class="card">
+      <div class="card-title">Зарегистрировать участника</div>
+      <p style="font-size:.82rem;color:#666;margin-bottom:18px;line-height:1.5">
+        Выполняется при <strong style="color:#a0a0c0">личной встрече</strong>.
+        Участник получает TOTP-секрет и ключевую пару.
+      </p>
+
+      <label>ID пользователя</label>
+      <input type="text" id="reg-id" placeholder="например: alice-001"
+             oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9_-]/g,'')">
+
+      <label>Полное имя</label>
+      <input type="text" id="reg-name" placeholder="Алиса Иванова">
+
+      <button class="btn btn-primary" onclick="registerUser()">
+        Выпустить ключи и сертификат
+      </button>
+    </div>
+  </div>
+
+  <!-- Правая колонка: список пользователей -->
+  <div class="card">
+    <div class="card-title">Участники ({{ users|length }})</div>
+
+    {% if users %}
+    <div class="users-list">
+      {% for u in users %}
+      <div class="user-row {% if u.revoked %}revoked{% endif %}" id="row-{{ u.id }}">
+        <div class="user-avatar">{{ u.name[0] | upper }}</div>
+        <div class="user-info">
+          <div class="user-name">
+            {{ u.name }}
+            {% if u.revoked %}<span class="badge-rev">отозван</span>{% endif %}
+          </div>
+          <div class="user-id">{{ u.id }}</div>
+          <div class="user-meta">
+            TOTP: {% if u.totp_secret %}✓{% else %}—{% endif %} &nbsp;
+            Cert: {% if u.serial %}✓{% else %}—{% endif %} &nbsp;
+            {{ u.created_at[:10] if u.created_at else '' }}
+          </div>
+        </div>
+        <div class="user-actions">
+          <button class="btn btn-sm btn-ghost"
+                  onclick="showUser('{{ u.id }}')">👁 Ключи</button>
+          {% if u.revoked %}
+          <button class="btn btn-sm btn-restore"
+                  onclick="toggleRevoke('{{ u.id }}', false)">↩</button>
+          {% else %}
+          <button class="btn btn-sm btn-danger"
+                  onclick="toggleRevoke('{{ u.id }}', true)">✕</button>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">Участников пока нет.<br>Зарегистрируйте первого при встрече.</div>
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- Modal: выданные ключи -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2 id="modal-title">Ключи участника</h2>
+
+    <!-- ШАГ 1: Главное — QR для установки на устройство -->
+    <div class="cred-section" id="modal-download-section">
+      <div class="cred-label" style="color:#86efac;font-size:.8rem">
+        ШАГ 1 — участник сканирует этот QR своим телефоном
+      </div>
+      <div style="background:#0a2a1a;border:1px solid #166534;border-radius:10px;padding:16px;text-align:center;margin-bottom:10px">
+        <div style="font-size:.82rem;color:#86efac;margin-bottom:10px">
+          📱 Одноразовая ссылка — скачает .p12 + .mobileconfig на устройство
+        </div>
+        <div class="qr-wrap" style="margin-bottom:10px">
+          <img id="modal-qr-download" src="" alt="QR для скачивания" style="width:180px;height:180px">
+        </div>
+        <div style="font-size:.75rem;color:#4ade80;word-break:break-all" id="modal-download-url"></div>
+      </div>
+
+      <!-- P12 пароль — называете устно -->
+      <div style="background:#2a1a0a;border:1px solid #92400e;border-radius:8px;padding:14px;margin-bottom:6px">
+        <div style="font-size:.75rem;color:#fbbf24;margin-bottom:8px;text-transform:uppercase;letter-spacing:1px">
+          Пароль для .p12 — скажите участнику устно
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="modal-p12-password" style="font-family:monospace;font-size:1.4rem;font-weight:700;color:#fcd34d;letter-spacing:4px"></span>
+          <button class="copy-btn" style="position:static" onclick="copyText('modal-p12-password')">копировать</button>
+        </div>
+      </div>
+      <div style="font-size:.75rem;color:#666;margin-bottom:4px">
+        ⚠ Ссылка одноразовая, действует 24 часа. Не закрывайте окно пока участник не скачает файл.
+      </div>
+    </div>
+
+    <!-- Разделитель -->
+    <div style="display:flex;align-items:center;gap:8px;margin:16px 0;color:#333;font-size:.78rem">
+      <div style="flex:1;height:1px;background:#2d2d4e"></div>
+      ШАГ 2 — резервный метод (Google Authenticator)
+      <div style="flex:1;height:1px;background:#2d2d4e"></div>
+    </div>
+
+    <!-- TOTP -->
+    <div class="cred-section">
+      <div class="cred-label">Участник сканирует в Google Authenticator / Aegis</div>
+      <div class="qr-wrap">
+        <img id="modal-qr-totp" src="" alt="QR для TOTP">
+      </div>
+      <div class="cred-label">Или вводит вручную</div>
+      <div class="secret-box" id="modal-totp-secret">
+        <button class="copy-btn" onclick="copyEl('modal-totp-secret')">копировать</button>
+        <span id="modal-totp-text"></span>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-close-modal" style="flex:1" onclick="closeModal()">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let currentUser = null
+
+  // ── CA ───────────────────────────────────────────────────
+
+  async function initCA() {
+    if (!confirm('Создать новый CA? Это нужно сделать один раз.')) return
+    const r = await post('/admin/api/init-ca', {})
+    if (r.ok) {
+      alert('CA создан! Перезагружаем страницу...')
+      location.reload()
+    } else {
+      alert('Ошибка: ' + r.reason)
+    }
+  }
+
+  // ── Регистрация ──────────────────────────────────────────
+
+  async function registerUser() {
+    const userId = document.getElementById('reg-id').value.trim()
+    const name   = document.getElementById('reg-name').value.trim()
+    if (!userId) { alert('Введите ID'); return }
+    if (!name)   { alert('Введите имя'); return }
+
+    const r = await post('/admin/api/register', { user_id: userId, name })
+    if (!r.ok) { alert('Ошибка: ' + r.reason); return }
+
+    document.getElementById('reg-id').value   = ''
+    document.getElementById('reg-name').value = ''
+
+    currentUser = r
+    openModal(r, true)
+
+    // Добавляем строку в список без перезагрузки
+    prependUserRow(r)
+  }
+
+  // ── Просмотр существующего пользователя ─────────────────
+
+  async function showUser(userId) {
+    const r = await fetch(`/admin/api/user/${userId}`).then(x => x.json())
+    if (!r.ok) { alert('Ошибка: ' + r.reason); return }
+    currentUser = r
+    openModal(r, false)
+  }
+
+  // ── Modal ────────────────────────────────────────────────
+
+  function openModal(data, isNew) {
+    document.getElementById('modal-title').textContent =
+      isNew ? `Ключи выданы: ${data.name}` : `Ключи: ${data.name}`
+
+    // QR для скачивания .p12 на устройство (главный)
+    const dlSection = document.getElementById('modal-download-section')
+    if (data.qr_download_b64 && data.download_url) {
+      dlSection.style.display = 'block'
+      document.getElementById('modal-qr-download').src =
+        `data:image/png;base64,${data.qr_download_b64}`
+      document.getElementById('modal-download-url').textContent = data.download_url
+      document.getElementById('modal-p12-password').textContent = data.p12_password || '—'
+    } else {
+      dlSection.style.display = 'none'
+    }
+
+    // QR для Google Authenticator (резервный)
+    document.getElementById('modal-qr-totp').src =
+      `data:image/png;base64,${data.qr_totp_b64}`
+    document.getElementById('modal-totp-text').textContent = data.totp_secret
+
+    document.getElementById('modal').classList.add('open')
+  }
+
+  function closeModal() {
+    document.getElementById('modal').classList.remove('open')
+    currentUser = null
+  }
+
+  document.getElementById('modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal')) closeModal()
+  })
+
+  // ── Отозвать / восстановить ──────────────────────────────
+
+  async function toggleRevoke(userId, revoke) {
+    const action = revoke ? 'отозвать' : 'восстановить'
+    if (!confirm(`${action} пользователя ${userId}?`)) return
+    const url = revoke ? '/admin/api/revoke' : '/admin/api/restore'
+    const r   = await post(url, { user_id: userId })
+    if (r.ok) location.reload()
+    else alert('Ошибка: ' + r.reason)
+  }
+
+  // ── Скачать файл с данными ───────────────────────────────
+
+  function downloadAll() {
+    if (!currentUser) return
+    const text = [
+      `=== Верификатор — данные участника ===`,
+      `Имя:    ${currentUser.name}`,
+      `ID:     ${currentUser.user_id}`,
+      ``,
+      `--- TOTP секрет (для Google Authenticator) ---`,
+      currentUser.totp_secret,
+      ``,
+      `--- Сертификат (.crt) ---`,
+      currentUser.cert_pem || '',
+      currentUser.private_key ? `--- Приватный ключ (.key) ---\n${currentUser.private_key}` : '',
+    ].join('\n')
+
+    const blob = new Blob([text], { type: 'text/plain' })
+    const a    = document.createElement('a')
+    a.href     = URL.createObjectURL(blob)
+    a.download = `${currentUser.user_id}-credentials.txt`
+    a.click()
+  }
+
+  // ── Добавить строку в список ─────────────────────────────
+
+  function prependUserRow(data) {
+    const list = document.querySelector('.users-list')
+    if (!list) {
+      // Список был пуст — перезагружаем
+      location.reload(); return
+    }
+    const div = document.createElement('div')
+    div.className = 'user-row'
+    div.id = `row-${data.user_id}`
+    div.innerHTML = `
+      <div class="user-avatar">${data.name[0].toUpperCase()}</div>
+      <div class="user-info">
+        <div class="user-name">${data.name}</div>
+        <div class="user-id">${data.user_id}</div>
+        <div class="user-meta">TOTP: ✓ &nbsp; Cert: ✓ &nbsp; только что</div>
+      </div>
+      <div class="user-actions">
+        <button class="btn btn-sm btn-ghost" onclick="showUser('${data.user_id}')">👁 Ключи</button>
+        <button class="btn btn-sm btn-danger" onclick="toggleRevoke('${data.user_id}', true)">✕</button>
+      </div>
+    `
+    list.prepend(div)
+  }
+
+  // ── Copy helpers ─────────────────────────────────────────
+
+  function copyText(id) {
+    const text = document.getElementById(id).textContent.trim()
+    navigator.clipboard.writeText(text)
+    event.target.textContent = '✓'
+    setTimeout(() => event.target.textContent = 'копировать', 1500)
+  }
+
+  function copyEl(id) {
+    const el   = document.getElementById(id)
+    const text = el.querySelector('span')?.textContent || el.textContent
+    navigator.clipboard.writeText(text.trim())
+    const btn = el.querySelector('.copy-btn')
+    if (btn) { btn.textContent = '✓'; setTimeout(() => btn.textContent = 'копировать', 1500) }
+  }
+
+  // ── Fetch helpers ────────────────────────────────────────
+
+  async function post(url, body) {
+    const r = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body)
+    })
+    return r.json()
+  }
+</script>
+</body>
+</html>
