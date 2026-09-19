@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ссылка недоступна</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f0f1a;
+      color: #d0d0e8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    .card {
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 14px;
+      padding: 40px 32px;
+      max-width: 420px;
+      width: 100%;
+      text-align: center;
+    }
+    .icon { font-size: 3rem; margin-bottom: 18px }
+    h1 { font-size: 1.15rem; color: #e0e0f0; margin-bottom: 12px }
+    p { font-size: .92rem; color: #a0a0c0; line-height: 1.6 }
+    .hint {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid #2d2d4e;
+      font-size: .82rem;
+      color: #777;
+    }
+    a { color: #5b4fe9; text-decoration: none }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🔒</div>
+    <h1>{{ error }}</h1>
+    <p>Эта ссылка больше не может быть использована.</p>
+    <div class="hint">
+      Обратитесь к администратору за новой ссылкой.<br>
+      <a href="/">На главную</a>
+    </div>
+  </div>
+</body>
+</html>

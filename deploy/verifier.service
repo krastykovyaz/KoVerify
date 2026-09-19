@@ -1,0 +1,63 @@
+# /etc/systemd/system/verifier.service
+[Unit]
+Description=Verifier (identity pairing service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/verifier
+
+# Secrets live in a root-owned file with mode 600, never in this unit:
+# systemd units are world-readable via systemctl cat.
+EnvironmentFile=/etc/verifier.env
+
+ExecStart=/var/www/verifier/venv/bin/gunicorn \
+    --workers 3 \
+    --bind unix:/run/verifier/verifier.sock \
+    --timeout 60 \
+    --graceful-timeout 30 \
+    --worker-tmp-dir /dev/shm \
+    --access-logfile - \
+    --error-logfile - \
+    wsgi:app
+
+Restart=on-failure
+RestartSec=5s
+
+# ── Sandboxing ────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# The only writable location.
+ReadWritePaths=/var/www/verifier
+
+# systemd creates and cleans up /run/verifier.
+RuntimeDirectory=verifier
+RuntimeDirectoryMode=0750
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

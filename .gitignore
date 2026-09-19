@@ -1,4 +1,9 @@
-venv
-ca/*
+venv/
+ca/
 *.sqlite
-__pycache__
+*.sqlite-wal
+*.sqlite-shm
+__pycache__/
+.pytest_cache/
+.env
+*.log

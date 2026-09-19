@@ -150,9 +150,10 @@
   }
 
   function joinSession() {
-    const code = document.getElementById('join-code').value.trim()
-    if (code.length < 6) { alert('Введите 6-значный код'); return }
-    location.href = `/session/${code}`
+    // Codes are issued in upper case; accept whatever casing was typed.
+    const code = document.getElementById('join-code').value.trim().toUpperCase()
+    if (code.length < 6) { alert('Введите код сессии'); return }
+    location.href = `/session/${encodeURIComponent(code)}`
   }
 </script>
 </body>
