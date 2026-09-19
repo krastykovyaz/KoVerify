@@ -1,0 +1,13 @@
+{
+  "name": "Verifier",
+  "short_name": "Verifier",
+  "display": "standalone",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "/static/apple-touch-icon_finger.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
