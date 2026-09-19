@@ -42,10 +42,29 @@ accepts a certificate as identity in exactly two situations.
 2. **Mutual TLS**, at `/api/session/<code>/verify/mtls`. A reverse proxy
    completed the handshake and reports the result. This is only believed when
    `MTLS_MODE=proxy`, the request arrives from an address in
-   `TRUSTED_PROXIES`, the proxy reports `SUCCESS`, and the forwarded
-   certificate validates against our CA.
+   `TRUSTED_PROXIES`, the proxy presents `PROXY_SHARED_SECRET`, the proxy
+   reports `SUCCESS`, and the forwarded certificate validates against our CA.
 
-`MTLS_MODE` defaults to `off`, so the weaker path is opt-in.
+This is the "Войти с сертификатом устройства" button on the session page,
+and it does nothing until nginx is actually asking browsers for a
+certificate. Three settings move together, never one alone:
+
+| Setting | Where | Off | On |
+|---|---|---|---|
+| `MTLS_MODE` | `/etc/verifier.env` | `off` | `proxy` |
+| `PROXY_SHARED_SECRET` | `/etc/verifier.env` | — | required when `MTLS_MODE=proxy` |
+| `ssl_client_certificate` / `ssl_verify_client optional` | `deploy/nginx-verifier.conf` | commented out | uncommented |
+
+Enabling only the nginx lines means nginx never tells the app a handshake
+succeeded, so the button still fails. Enabling only `MTLS_MODE` means nginx
+never asks the browser for a certificate in the first place, so no browser
+ever has one to send — this was the actual state of the deployed site,
+which is why the button failed with "сертификат не найден на устройстве"
+for every enrolled user regardless of whether they had installed one.
+
+`ssl_verify_client optional` requests a certificate from every connecting
+browser, but the browser only shows a picker when it holds one issued by
+`ca.crt`; an ordinary visitor with no certificate from us is not prompted.
 
 The nginx snippet in `deploy/nginx-proxy-headers.conf` overwrites every
 `X-SSL-Client-*` header on every proxied location. That snippet is a security
