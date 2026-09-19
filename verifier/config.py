@@ -72,7 +72,7 @@ class Config:
         self.rl_admin_login = (int(env.get("RL_ADMIN_LOGIN_MAX", "5")), 900)
         self.rl_totp = (int(env.get("RL_TOTP_MAX", "10")), 300)
         self.rl_mtls = (int(env.get("RL_MTLS_MAX", "20")), 300)
-        self.rl_status = (int(env.get("RL_STATUS_MAX", "120")), 60)
+        self.rl_status = (int(env.get("RL_STATUS_MAX", "300")), 60)
 
         self._validate()
 
