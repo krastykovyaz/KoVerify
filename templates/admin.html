@@ -354,7 +354,7 @@
         <div class="qr-wrap" style="margin-bottom:10px">
           <img id="modal-qr-download" src="" alt="QR для скачивания" style="width:180px;height:180px">
         </div>
-        <div style="font-size:.75rem;color:#4ade80;word-break:break-all" id="modal-download-url"></div>
+        <a href="#" target="_blank" rel="noopener" style="font-size:.75rem;color:#4ade80;word-break:break-all" id="modal-download-url"></a>
       </div>
 
       <!-- P12 пароль — называете устно -->
@@ -456,7 +456,9 @@
       dlSection.style.display = 'block'
       document.getElementById('modal-qr-download').src =
         `data:image/png;base64,${data.qr_download_b64}`
-      document.getElementById('modal-download-url').textContent = data.download_url
+      const dlLink = document.getElementById('modal-download-url')
+      dlLink.href = data.download_url
+      dlLink.textContent = data.download_url
       document.getElementById('modal-p12-password').textContent = data.p12_password || '—'
     } else {
       dlSection.style.display = 'none'
