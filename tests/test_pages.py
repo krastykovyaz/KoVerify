@@ -17,6 +17,17 @@ def test_session_code_reaches_the_page(client):
         assert code in client.get(path).get_data(as_text=True)
 
 
+def test_join_code_input_accepts_a_full_length_code(client):
+    """The input previously capped at 6 characters while real codes are 8,
+    silently truncating every manually typed code to one that could never
+    match a real session."""
+    code = client.post("/api/session/create").get_json()["code"]
+    assert len(code) == 8
+    body = client.get("/").get_data(as_text=True)
+    assert 'maxlength="8"' in body
+    assert 'maxlength="6"' not in body
+
+
 def test_result_page_polls_the_status_endpoint(client):
     """The page is useless if it is not wired to the status route."""
     body = client.get("/result/ABCD2345").get_data(as_text=True)

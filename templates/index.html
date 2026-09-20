@@ -126,8 +126,8 @@
 
   <div class="divider">или войти по коду</div>
 
-  <input id="join-code" type="text" placeholder="Введите код сессии (например A3F9B2)"
-         maxlength="6" oninput="this.value = this.value.toUpperCase()">
+  <input id="join-code" type="text" placeholder="Введите код сессии (например A3F9B2XZ)"
+         maxlength="8" oninput="this.value = this.value.toUpperCase()">
   <button class="btn btn-secondary" onclick="joinSession()">Войти в сессию</button>
 </div>
 
@@ -155,8 +155,11 @@
 
   function joinSession() {
     // Codes are issued in upper case; accept whatever casing was typed.
+    // The input previously capped at 6 characters while real codes are 8,
+    // silently truncating every manually typed code to one that could
+    // never match a real session.
     const code = document.getElementById('join-code').value.trim().toUpperCase()
-    if (code.length < 6) { alert('Введите код сессии'); return }
+    if (code.length !== 8) { alert('Код сессии — 8 символов'); return }
     location.href = `/session/${encodeURIComponent(code)}`
   }
 </script>
