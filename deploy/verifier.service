@@ -13,6 +13,9 @@ WorkingDirectory=/var/www/verifier
 # Secrets live in a root-owned file with mode 600, never in this unit:
 # systemd units are world-readable via systemctl cat.
 EnvironmentFile=/etc/verifier.env
+# Code is read-only to the service (see ReadOnlyPaths), so never try to write
+# bytecode next to it.
+Environment=PYTHONDONTWRITEBYTECODE=1
 
 ExecStart=/var/www/verifier/venv/bin/gunicorn \
     --workers 3 \
@@ -20,6 +23,7 @@ ExecStart=/var/www/verifier/venv/bin/gunicorn \
     --timeout 60 \
     --graceful-timeout 30 \
     --worker-tmp-dir /dev/shm \
+    --no-control-socket \
     --access-logfile - \
     --error-logfile - \
     wsgi:app
@@ -50,7 +54,10 @@ SystemCallErrorNumber=EPERM
 UMask=0077
 
 # The only writable location.
+# The service owns its data (database, CA) but must not be able to rewrite its
+# own code or interpreter, so a compromised worker cannot persist itself.
 ReadWritePaths=/var/www/verifier
+ReadOnlyPaths=/var/www/verifier/verifier /var/www/verifier/templates /var/www/verifier/venv /var/www/verifier/wsgi.py
 
 # systemd creates and cleans up /run/verifier.
 RuntimeDirectory=verifier

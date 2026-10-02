@@ -92,6 +92,11 @@ def _deliver(token, builder, mimetype, suffix, as_attachment=True):
         return "Ссылка недействительна или уже использована", 410
 
     payload = builder(row)
+    # Delivered: the server no longer needs to hold the user's private key. A
+    # transfer that fails is recovered by reissuing, not by keeping it around.
+    conn = get_db()
+    conn.execute("UPDATE users SET p12_b64=NULL WHERE id=?", (row["user_id"],))
+    conn.commit()
     buffer = io.BytesIO(payload)
     buffer.seek(0)
     response = send_file(

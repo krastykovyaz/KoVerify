@@ -3,7 +3,6 @@ import base64
 import datetime as dt
 import secrets
 
-import pyotp
 from flask import Blueprint, current_app, jsonify, request
 
 from ..ca import load_ca_cert
@@ -11,6 +10,7 @@ from ..certs import CertError, authenticate_by_challenge, lookup_user
 from ..db import get_db, parse_ts, purge_expired, utcnow
 from ..mtls import authenticated_client_cert
 from ..security import client_ip, rate_limit
+from ..totp import match_step
 
 bp = Blueprint("api", __name__)
 
@@ -177,8 +177,20 @@ def verify_totp(code):
     # One message for both cases, so the endpoint cannot be used to enumerate IDs.
     if not user or not user["totp_secret"] or not otp:
         return jsonify({"ok": False, "reason": "неверный ID или код"})
-    if not pyotp.TOTP(user["totp_secret"]).verify(otp, valid_window=1):
+    step = match_step(user["totp_secret"], otp)
+    if step is None:
         return jsonify({"ok": False, "reason": "неверный ID или код"})
+    # A code is good once. The UPDATE carries the precondition, so two requests
+    # replaying the same code cannot both pass.
+    claimed = conn.execute(
+        "UPDATE users SET totp_last_step=? WHERE id=? "
+        "AND (totp_last_step IS NULL OR totp_last_step < ?)",
+        (step, user_id, step),
+    )
+    conn.commit()
+    if claimed.rowcount != 1:
+        return jsonify({"ok": False,
+                        "reason": "этот код уже использован, дождитесь следующего"})
 
     slot = record_verification(conn, code, user_id, user["name"], "TOTP")
     if slot is None:

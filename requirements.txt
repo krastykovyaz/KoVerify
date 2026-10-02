@@ -1,5 +1,10 @@
-flask
-cryptography>=38
-pyotp
-qrcode[pil]
-gunicorn
+# Pinned to the versions running in production on 2026-10-02. Unpinned installs
+# had already drifted between this checkout and the server (gunicorn, Werkzeug).
+flask==3.1.3
+werkzeug==3.1.8
+jinja2==3.1.6
+cryptography==46.0.6
+pyotp==2.9.0
+qrcode[pil]==8.2
+pillow==12.2.0
+gunicorn==25.3.0

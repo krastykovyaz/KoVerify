@@ -1,5 +1,7 @@
 """Authentication helpers: constant-time comparison and durable rate limiting."""
 import hmac
+import ipaddress
+import time
 from datetime import timedelta
 from functools import wraps
 
@@ -14,20 +16,41 @@ def constant_time_equals(a, b):
     return hmac.compare_digest(str(a).encode(), str(b).encode())
 
 
-def client_ip():
-    """The caller's address.
+def _proxy_vouched_for(cfg):
+    """True when the request provably came through our own nginx.
 
-    X-Forwarded-For is only honoured when the immediate peer is a trusted
-    proxy, so a hostile client cannot forge its own rate-limit identity.
+    Over TCP that means a configured proxy address. Over a unix socket there
+    is no peer address at all, so the shared secret that only nginx knows is
+    the proof; with no secret configured, socket permissions are the control.
+    """
+    peer = request.remote_addr or ""
+    if peer:
+        return peer in cfg.trusted_proxies
+    if not cfg.proxy_shared_secret:
+        return True
+    return constant_time_equals(
+        request.headers.get("X-Proxy-Auth"), cfg.proxy_shared_secret
+    )
+
+
+def client_ip():
+    """The caller's address, for rate limiting.
+
+    Behind the unix socket REMOTE_ADDR is empty, so without this every caller
+    shared one "unknown" bucket and a single stranger could lock everyone out.
+    nginx overwrites X-Real-IP with the true address; it is believed only when
+    the request provably came through nginx. X-Forwarded-For is never used: a
+    client can prepend its own entry to it even through a trusted proxy.
     """
     cfg = current_app.config["VERIFIER"]
-    peer = request.remote_addr or "unknown"
-    if peer in cfg.trusted_proxies:
-        forwarded = request.headers.get("X-Forwarded-For", "")
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return peer
+    peer = request.remote_addr or ""
+    if _proxy_vouched_for(cfg):
+        candidate = request.headers.get("X-Real-IP", "").strip()
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            pass
+    return peer or "unknown"
 
 
 def rate_limit(bucket, identifier, limit_spec):
@@ -78,7 +101,15 @@ def clear_rate_limit(bucket, identifier):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("is_admin"):
+        cfg = current_app.config["VERIFIER"]
+        started = session.get("admin_at")
+        fresh = (
+            session.get("is_admin")
+            and isinstance(started, int)
+            and 0 <= time.time() - started <= cfg.admin_session_minutes * 60
+        )
+        if not fresh:
+            session.clear()
             if request.path.startswith("/admin/api/"):
                 return jsonify({"ok": False, "reason": "требуется вход"}), 401
             return redirect(url_for("admin.admin_login"))

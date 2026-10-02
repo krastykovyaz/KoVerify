@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, pkcs12
 from cryptography.x509.oid import NameOID
 
+from .config import ConfigError
 from .db import utcnow
 
 KEY_FILE_MODE = 0o600
@@ -118,6 +119,44 @@ def load_ca(cfg):
     with open(cfg.ca_cert_path, "rb") as f:
         ca_cert = x509.load_pem_x509_certificate(f.read())
     return ca_key, ca_cert
+
+
+def verify_ca(cfg):
+    """Refuse to run on a CA that cannot validate what it issued.
+
+    The production CA once carried a certificate whose issuer did not match its
+    own subject. Every client certificate it signed was unusable, and nothing
+    said so until mutual TLS was switched on months later.
+    """
+    try:
+        key, cert = load_ca(cfg)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "Refusing to start: the CA private key could not be read. If the key is "
+            "encrypted, CA_PASSPHRASE must be set to its passphrase; if it is not, "
+            f"CA_PASSPHRASE must be empty. ({exc})"
+        )
+    problems = []
+    if cert.issuer != cert.subject:
+        problems.append("the CA certificate's issuer does not match its subject")
+    spki = serialization.PublicFormat.SubjectPublicKeyInfo
+    der = serialization.Encoding.DER
+    if key.public_key().public_bytes(der, spki) != cert.public_key().public_bytes(der, spki):
+        problems.append("ca.key does not belong to ca.crt")
+    else:
+        try:
+            cert.verify_directly_issued_by(cert)
+        except Exception:
+            problems.append("the CA certificate is not validly self-signed")
+    if cert.not_valid_after_utc <= utcnow():
+        problems.append("the CA certificate has expired")
+    try:
+        if not cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+            problems.append("the CA certificate is not marked CA:TRUE")
+    except x509.ExtensionNotFound:
+        problems.append("the CA certificate has no basicConstraints extension")
+    if problems:
+        raise ConfigError("Refusing to start with a broken CA:\n  - " + "\n  - ".join(problems))
 
 
 def load_ca_cert(cfg):

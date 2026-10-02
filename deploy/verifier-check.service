@@ -1,0 +1,6 @@
+[Unit]
+Description=Verifier health and certificate-expiry check
+
+[Service]
+Type=oneshot
+ExecStart=/var/www/verifier/deploy/check-health.sh

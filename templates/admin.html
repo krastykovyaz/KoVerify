@@ -243,7 +243,7 @@
   <h1>🔐 Панель управления верификатором</h1>
   <div class="topbar-actions">
     <a href="/" style="color:#666;font-size:.82rem;text-decoration:none">← Сайт</a>
-    <a href="/admin/logout"><button class="btn btn-logout">Выйти</button></a>
+    <form method="post" action="/admin/logout" style="display:inline"><button class="btn btn-logout" type="submit">Выйти</button></form>
   </div>
 </div>
 
@@ -319,6 +319,10 @@
         <div class="user-actions">
           <button class="btn btn-sm btn-ghost"
                   onclick="showUser('{{ u.id }}')">👁 Ключи</button>
+          {% if not u.revoked %}
+          <button class="btn btn-sm btn-ghost" title="Выпустить новые ключи"
+                  onclick="reissue('{{ u.id }}')">🔄</button>
+          {% endif %}
           {% if u.revoked %}
           <button class="btn btn-sm btn-restore"
                   onclick="toggleRevoke('{{ u.id }}', false)">↩</button>
@@ -400,6 +404,22 @@
 
 <script>
   let currentUser = null
+
+  // Anything that came from a person's name or id goes through this before it
+  // is placed in markup.
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, ch => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ))
+  }
+
+  async function reissue(userId) {
+    if (!confirm('Выпустить новые ключи? Старый сертификат сразу перестанет работать.')) return
+    const r = await post('/admin/api/reissue', { user_id: userId })
+    if (!r.ok) { alert('Ошибка: ' + r.reason); return }
+    currentUser = r
+    openModal(r, true)
+  }
 
   // ── CA ───────────────────────────────────────────────────
 
@@ -528,14 +548,15 @@
     div.className = 'user-row'
     div.id = `row-${data.user_id}`
     div.innerHTML = `
-      <div class="user-avatar">${data.name[0].toUpperCase()}</div>
+      <div class="user-avatar">${esc(data.name[0].toUpperCase())}</div>
       <div class="user-info">
-        <div class="user-name">${data.name}</div>
-        <div class="user-id">${data.user_id}</div>
+        <div class="user-name">${esc(data.name)}</div>
+        <div class="user-id">${esc(data.user_id)}</div>
         <div class="user-meta">TOTP: ✓ &nbsp; Cert: ✓ &nbsp; только что</div>
       </div>
       <div class="user-actions">
-        <button class="btn btn-sm btn-ghost" onclick="showUser('${data.user_id}')">👁 Ключи</button>
+        <button class="btn btn-sm btn-ghost" onclick="showUser('${esc(data.user_id)}')">👁 Ключи</button>
+        <button class="btn btn-sm btn-ghost" title="Выпустить новые ключи" onclick="reissue('${esc(data.user_id)}')">🔄</button>
         <button class="btn btn-sm btn-danger" onclick="toggleRevoke('${data.user_id}', true)">✕</button>
       </div>
     `

@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
     serial       TEXT,
     p12_b64      TEXT,
     revoked      INTEGER DEFAULT 0,
-    created_at   TEXT
+    created_at   TEXT,
+    totp_last_step INTEGER
 );
 CREATE TABLE IF NOT EXISTS sessions (
     code        TEXT PRIMARY KEY,
@@ -98,11 +99,22 @@ def close_db(exc=None):
         conn.close()
 
 
+# Columns added after the first release. Each is applied only when missing, so
+# a populated production database upgrades in place.
+_ADDED_COLUMNS = (
+    ("users", "totp_last_step", "INTEGER"),
+)
+
+
 def init_db(path):
     """Create tables if absent. Additive only, safe against a populated database."""
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        for table, column, decl in _ADDED_COLUMNS:
+            have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         conn.commit()
     finally:
         conn.close()
@@ -122,4 +134,13 @@ def purge_expired(conn, nonce_ttl_seconds):
     conn.execute(
         "DELETE FROM sessions WHERE expires_at < ?",
         ((now - timedelta(days=1)).isoformat(),),
+    )
+    # The private-key bundle is only needed until the one-time link is spent or
+    # lapses. Keeping it longer just leaves a second copy of every user's key
+    # in the database and in every backup of it.
+    conn.execute(
+        "UPDATE users SET p12_b64=NULL WHERE p12_b64 IS NOT NULL AND NOT EXISTS ("
+        "  SELECT 1 FROM download_tokens t WHERE t.user_id=users.id "
+        "  AND t.used=0 AND t.expires_at >= ?)",
+        (now.isoformat(),),
     )

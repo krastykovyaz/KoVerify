@@ -125,7 +125,13 @@
 </div>
 
 <script>
-  const CODE = "{{ code }}"
+  const CODE = {{ code|tojson }}
+
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, ch => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ))
+  }
 
   function showAlert(msg, type) {
     const el = document.getElementById('alert')
@@ -151,7 +157,7 @@
       const data = await res.json()
 
       if (data.ok) {
-        showAlert(`✅ Верифицированы как <strong>${data.name}</strong>`, 'success')
+        showAlert(`✅ Верифицированы как <strong>${esc(data.name)}</strong>`, 'success')
         setTimeout(() => location.href = `/result/${CODE}`, 1000)
       } else if (data.reason && data.reason.includes('не предоставлен')) {
         showAlert(
@@ -166,12 +172,12 @@
         btn.disabled = false
         text.textContent = 'Войти с сертификатом устройства'
       } else {
-        showAlert('❌ ' + (data.reason || 'Ошибка'), 'error')
+        showAlert('❌ ' + esc(data.reason || 'Ошибка'), 'error')
         btn.disabled = false
         text.textContent = 'Войти с сертификатом устройства'
       }
     } catch (e) {
-      showAlert('❌ Ошибка сети: ' + e.message, 'error')
+      showAlert('❌ Ошибка сети: ' + esc(e.message), 'error')
       btn.disabled = false
       text.textContent = 'Войти с сертификатом устройства'
     }
@@ -197,15 +203,15 @@
       const data = await res.json()
 
       if (data.ok) {
-        showAlert(`✅ Верифицированы как <strong>${data.name}</strong>`, 'success')
+        showAlert(`✅ Верифицированы как <strong>${esc(data.name)}</strong>`, 'success')
         setTimeout(() => location.href = `/result/${CODE}`, 1000)
       } else {
-        showAlert('❌ ' + data.reason, 'error')
+        showAlert('❌ ' + esc(data.reason), 'error')
         btn.disabled = false
         btn.textContent = 'Войти по коду'
       }
     } catch (e) {
-      showAlert('❌ Ошибка: ' + e.message, 'error')
+      showAlert('❌ Ошибка: ' + esc(e.message), 'error')
       btn.disabled = false
       btn.textContent = 'Войти по коду'
     }

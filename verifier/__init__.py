@@ -4,6 +4,7 @@ import os
 from flask import Flask
 
 from .config import Config, ConfigError  # noqa: F401  (re-exported)
+from .ca import ca_exists, verify_ca
 from .db import close_db, init_db
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,6 +48,8 @@ def create_app(config=None, testing=False):
     )
 
     init_db(cfg.db_path)
+    if ca_exists(cfg):
+        verify_ca(cfg)
     app.teardown_appcontext(close_db)
 
     from .blueprints.admin import bp as admin_bp

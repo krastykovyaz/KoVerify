@@ -67,6 +67,8 @@ class Config:
         self.download_ttl_hours = int(env.get("DOWNLOAD_TTL_HOURS", "24"))
         self.nonce_ttl_seconds = int(env.get("NONCE_TTL_SECONDS", "300"))
         self.cert_valid_days = int(env.get("CERT_VALID_DAYS", "730"))
+        # How long an admin login stays good, enforced server-side.
+        self.admin_session_minutes = int(env.get("ADMIN_SESSION_MINUTES", "60"))
 
         # Rate limits: (max attempts, window seconds).
         self.rl_admin_login = (int(env.get("RL_ADMIN_LOGIN_MAX", "5")), 900)
