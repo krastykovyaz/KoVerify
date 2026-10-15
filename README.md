@@ -160,8 +160,18 @@ Run in this order, as root:
   expires.** If a delivery fails, use the 🔄 button in the panel to reissue: it
   makes a new key pair for the same person, keeps their TOTP secret, and the
   old certificate stops working immediately.
+- **Handing everything over at once.** After issuing keys the panel shows the
+  login (ID), the certificate password, the TOTP key and one QR. With "Всё
+  сразу" ticked (the default), that QR's link carries the certificate password
+  after the `#`, so the participant's page shows their login, password and TOTP
+  key together. Browsers never send a fragment to a server, so the password is
+  not in nginx logs, the application or the database. The trade-off is real: the
+  link then contains everything needed to install the credential, so show that
+  QR only to the participant. Untick it to give the password orally instead.
+  "Скопировать всё" copies login, password, TOTP key and link as plain text.
 - The profile deliberately omits the bundle passphrase, so iOS prompts for it
-  at install time. Give that passphrase to the person directly.
+  at install time. With the all-in-one link the person reads it from their page;
+  otherwise give it to them directly.
 - A TOTP code works once. A second use of the same code is refused until the
   next 30-second step.
 - Display names may not contain `<`, `>` or control characters.
