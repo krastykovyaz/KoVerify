@@ -102,6 +102,29 @@ and each of them can read, copy or delete what is there.
   crypto against a live server, including tampering, cross-room replay and a
   swapped key. It needs Node.js and is skipped without it.
 
+## Video verification
+
+Either person in a room can ask the other to prove who they are on video.
+
+1. **Ask.** "Запросить видеопроверку" sends a request. The other person sees an
+   incoming banner (and the tab title flashes) and can accept or decline. A
+   request nobody answers lapses after two minutes.
+2. **Meet.** Once accepted, both get a button that opens a video call. The call
+   screen repeats the safety code: reading it aloud on camera is what ties the
+   video to the encrypted channel, so a swapped key cannot survive it.
+3. **Decide.** Whoever asked is the verifier. They press "подтверждаю" or "не
+   подтверждаю", and both screens show the result. A denial tells both people
+   not to share secrets. Either side can ask again, and the roles can swap.
+
+The server only tracks the request, who asked, and the result, and each step is
+a single guarded update, so two people cannot start conflicting requests. It
+does not carry video. The call happens at `VIDEO_URL_TEMPLATE` (public Jitsi by
+default) in a room named by 128 bits that the two browsers derive from their
+shared secret; the server never sees it and nobody else can guess it. The
+provider can still see that a call happens and the video itself, so point the
+template at a self-hosted Jitsi if that matters. A built-in call was not built:
+it needs a TURN relay this host does not have.
+
 ## Deploying
 
 ```bash

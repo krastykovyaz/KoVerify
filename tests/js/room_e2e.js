@@ -69,6 +69,18 @@ const rejects = async (promise) => { try { await promise; return false } catch (
   const keyA = await RC.deriveRoomKey(A.privateJwk, stateA.peer.public_key, code)
   const keyB = await RC.deriveRoomKey(B.privateJwk, stateB.peer.public_key, code)
 
+  // The video meeting's name: both browsers agree, nobody else can compute it.
+  const nameA = await RC.videoRoomName(A.privateJwk, stateA.peer.public_key, code)
+  const nameB = await RC.videoRoomName(B.privateJwk, stateB.peer.public_key, code)
+  ok('both browsers derive the same video room name', nameA === nameB && /^verifier-[0-9a-f]{32}$/.test(nameA))
+  ok('the name differs from room to room', nameA !== await RC.videoRoomName(A.privateJwk, stateA.peer.public_key, 'ZZZZ2345'))
+  const outsider = await RC.generateIdentity()
+  ok('someone with only the public keys cannot derive it',
+     nameA !== await RC.videoRoomName(outsider.privateJwk, stateA.peer.public_key, code))
+  const everythingServerSaw = JSON.stringify([stateA, stateB])
+  ok('the server never saw the name or the secret behind it',
+     !everythingServerSaw.includes(nameA) && !everythingServerSaw.includes(nameA.slice('verifier-'.length)))
+
   // A sends everything at once; B reads it.
   const sealed = await RC.encryptItem(keyA, code, A.slot, { ...SECRETS, junk: 'dropped' })
   const sent = await api('POST', `/api/session/${code}/room/items`, A.token, sealed)

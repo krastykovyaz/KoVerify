@@ -86,6 +86,20 @@
     .item-label { width: 70px; flex-shrink: 0; font-size: .72rem; color: #9ca3af }
     .item-value { flex: 1; font-family: ui-monospace, monospace; font-size: .95rem; color: #111;
                   word-break: break-all; white-space: pre-wrap }
+    .video { border: 1.5px solid #c7d2fe; background: #eef2ff; border-radius: 12px;
+             padding: 12px 14px; margin-bottom: 16px }
+    .video.incoming { border-color: #f59e0b; background: #fffbeb }
+    .video.good { border-color: #86efac; background: #f0fdf4 }
+    .video.bad  { border-color: #fecaca; background: #fef2f2 }
+    .video-title { font-weight: 700; font-size: .9rem; color: #312e81; margin-bottom: 6px }
+    .video-text { font-size: .85rem; color: #374151; line-height: 1.5; margin-bottom: 10px }
+    .video-buttons { display: flex; gap: 8px; flex-wrap: wrap }
+    .video-buttons button { flex: 1; min-width: 120px; padding: 10px; border: none; border-radius: 10px;
+                            font: inherit; font-size: .9rem; font-weight: 600; cursor: pointer }
+    .vb-primary { background: #4338ca; color: #fff }
+    .vb-good { background: #16a34a; color: #fff }
+    .vb-bad { background: #fff; color: #991b1b; border: 1.5px solid #fecaca !important }
+    .vb-quiet { background: #e5e7eb; color: #374151 }
     .room-error { color: #991b1b; font-size: .8rem; margin-top: 8px; min-height: 1em }
   </style>
 </head>
@@ -130,6 +144,14 @@
       <b id="room-safety"></b>
       <small>Назовите его друг другу вслух. Если коды не совпали, ничего не отправляйте:
       кто-то вмешался.</small>
+    </div>
+
+    <div class="video" id="video">
+      <div class="video-title">📹 Видеопроверка</div>
+      <div id="video-text" class="video-text"></div>
+      <a id="video-link" class="send" style="display:none;text-align:center;text-decoration:none"
+         target="_blank" rel="noopener noreferrer">Открыть видеозвонок</a>
+      <div class="video-buttons" id="video-buttons"></div>
     </div>
 
     <form id="room-form" autocomplete="off">
@@ -260,6 +282,7 @@
     document.getElementById('room-live').style.display = 'none'
     document.getElementById('room-items').textContent = ''
     shown.clear()
+    flashTitle(false)
     setRoomNote('Комната закрыта: данные удалены с сервера. То, что вы скопировали, осталось только у вас.', 'expired')
   }
 
@@ -336,6 +359,7 @@
     }
     setRoomNote('')
     document.getElementById('room-live').style.display = 'block'
+    await renderVideo(state)
 
     const list = document.getElementById('room-items')
     const present = new Set(state.items.map(i => i.id))
@@ -349,6 +373,103 @@
       const node = buildItem(item, fields, item.from === state.slot, state.peer.name)
       shown.set(item.id, node)
       list.prepend(node)
+    }
+  }
+
+
+  // ── Видеопроверка ──────────────────────────────────────────────────
+  // One person asks, the other accepts, they meet in a video call and the asker
+  // records whether they are satisfied. The server only tracks the request; the
+  // call happens at a link whose name only these two browsers can compute.
+  let videoNameFor = null, videoName = null, titleFlash = null
+  const BASE_TITLE = document.title
+
+  async function videoAction(action) {
+    setRoomError('')
+    const { body } = await roomApi('/video', { method: 'POST', body: JSON.stringify({ action }) })
+    if (!body || !body.ok) setRoomError((body && body.reason) || 'Не удалось выполнить действие.')
+    pollRoomNow()
+  }
+
+  function videoButton(label, cls, action) {
+    const b = document.createElement('button')
+    b.type = 'button'; b.className = cls; b.textContent = label
+    b.onclick = () => { b.disabled = true; videoAction(action) }
+    return b
+  }
+
+  function flashTitle(on) {
+    if (on && !titleFlash) {
+      let flip = false
+      titleFlash = setInterval(() => {
+        document.title = (flip = !flip) ? '📹 Запрос видеопроверки' : BASE_TITLE
+      }, 1000)
+    } else if (!on && titleFlash) {
+      clearInterval(titleFlash); titleFlash = null; document.title = BASE_TITLE
+    }
+  }
+
+  async function renderVideo(state) {
+    const box = document.getElementById('video')
+    const text = document.getElementById('video-text')
+    const link = document.getElementById('video-link')
+    const buttons = document.getElementById('video-buttons')
+    const peer = state.peer.name || 'собеседник'
+    const v = state.video
+    const mineIsAsker = v && v.by === state.slot
+    const askerName = v ? (mineIsAsker ? 'Вы' : peer) : ''
+
+    box.className = 'video'
+    link.style.display = 'none'
+    buttons.textContent = ''
+    flashTitle(false)
+
+    if (v && v.state === 'active') {
+      // Both ends compute the same unguessable meeting name locally.
+      if (videoNameFor !== state.peer.public_key) {
+        videoName = await RC.videoRoomName(seat.privateJwk, state.peer.public_key, CODE)
+        videoNameFor = state.peer.public_key
+      }
+      const url = state.video_url_template.replace('{room}', videoName)
+      if (url.startsWith('https://')) { link.href = url; link.style.display = 'block' }
+    }
+
+    if (!v) {
+      text.textContent = `Хотите убедиться, что на связи действительно ${peer}? Попросите его выйти на видео.`
+      buttons.append(videoButton('Запросить видеопроверку', 'vb-primary', 'request'))
+    } else if (v.state === 'requested' && mineIsAsker) {
+      text.textContent = `Запрос отправлен. Ждём ответа от ${peer}…`
+      buttons.append(videoButton('Отменить запрос', 'vb-quiet', 'cancel'))
+    } else if (v.state === 'requested') {
+      box.className = 'video incoming'
+      flashTitle(true)
+      text.textContent = `${peer} просит пройти видеопроверку: вы вместе откроете видеозвонок, и он убедится, что это вы.`
+      buttons.append(videoButton('Принять', 'vb-primary', 'accept'), videoButton('Отклонить', 'vb-bad', 'decline'))
+    } else if (v.state === 'active') {
+      const safety = document.getElementById('room-safety').textContent
+      text.textContent = mineIsAsker
+        ? `Откройте видеозвонок. Убедитесь, что это ${peer}, и назовите друг другу код сверки ${safety}. Затем отметьте результат.`
+        : `Откройте видеозвонок: ${peer} проверяет вашу личность. Назовите вслух код сверки ${safety}.`
+      if (mineIsAsker) {
+        buttons.append(videoButton('Это он(а): подтверждаю', 'vb-good', 'confirm'),
+                       videoButton('Не подтверждаю', 'vb-bad', 'deny'))
+      } else {
+        const wait = document.createElement('div')
+        wait.className = 'video-text'; wait.textContent = `Ждём решения ${peer}…`
+        buttons.append(wait)
+      }
+    } else if (v.state === 'confirmed') {
+      box.className = 'video good'
+      text.textContent = `✅ ${askerName} подтвердил(а) личность собеседника по видео.`
+      buttons.append(videoButton('Запросить снова', 'vb-quiet', 'request'))
+    } else if (v.state === 'denied') {
+      box.className = 'video bad'
+      text.textContent = `⚠️ ${askerName} не подтвердил(а) личность собеседника по видео. Не передавайте секреты, пока не разберётесь.`
+      buttons.append(videoButton('Запросить снова', 'vb-quiet', 'request'))
+    } else if (v.state === 'declined') {
+      box.className = 'video bad'
+      text.textContent = mineIsAsker ? `${peer} отклонил(а) запрос видеопроверки.` : 'Вы отклонили запрос видеопроверки.'
+      buttons.append(videoButton('Запросить снова', 'vb-quiet', 'request'))
     }
   }
 

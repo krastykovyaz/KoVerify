@@ -40,7 +40,7 @@ def test_two_browsers_exchange_secrets_the_server_cannot_read(live, cfg):
     assert "error" not in report, report.get("error")
     failed = [name for name, passed in report["checks"].items() if not passed]
     assert not failed, failed
-    assert len(report["checks"]) >= 18
+    assert len(report["checks"]) >= 22
 
     conn = sqlite3.connect(cfg.db_path)
     dump = "\n".join(conn.iterdump())

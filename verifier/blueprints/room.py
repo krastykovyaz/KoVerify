@@ -11,6 +11,7 @@ shows both sides a short code derived from the two keys, to be compared aloud.
 """
 import base64
 import binascii
+from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from flask import Blueprint, current_app, jsonify, request
@@ -25,6 +26,11 @@ MAX_CIPHERTEXT_BYTES = 12 * 1024        # a handful of short fields, never files
 IV_BYTES = 12                           # AES-GCM
 GCM_TAG_BYTES = 16
 PUBLIC_KEY_BYTES = 65                   # uncompressed P-256 point
+
+# A request nobody answers lapses, and a call that is never closed out does too,
+# so the room never shows a stale prompt.
+VIDEO_REQUEST_TTL = timedelta(seconds=120)
+VIDEO_ACTIVE_TTL = timedelta(minutes=30)
 
 
 def _cfg():
@@ -102,6 +108,19 @@ def _side(row, slot):
     }
 
 
+def _video_view(row):
+    """The current video verification, or None when idle or lapsed."""
+    state, by, at = row["video_state"], row["video_by"], parse_ts(row["video_at"])
+    if not state or at is None:
+        return None
+    now = utcnow()
+    if state == "requested" and now - at > VIDEO_REQUEST_TTL:
+        return None
+    if state == "active" and now - at > VIDEO_ACTIVE_TTL:
+        return None
+    return {"state": state, "by": by, "at": row["video_at"]}
+
+
 @bp.route("", methods=["GET"])
 def room_state(code):
     auth = _authorize(code)
@@ -122,6 +141,8 @@ def room_state(code):
         "peer": other,
         "ready": bool(you["verified"] and other["verified"]
                       and you["public_key"] and other["public_key"]),
+        "video": _video_view(row),
+        "video_url_template": _cfg().video_url_template,
         "items": [
             {"id": i["id"], "from": i["from_slot"], "iv": i["iv"],
              "ciphertext": i["ciphertext"], "created_at": i["created_at"]}
@@ -197,3 +218,63 @@ def delete_item(code, item_id):
     if cursor.rowcount == 0:
         return _fail("запись не найдена", 404)
     return jsonify({"ok": True})
+
+
+# What may happen to a video verification, and who may do it. The requester is
+# the verifier: they asked to see the other person and they decide the outcome.
+# Every transition is one UPDATE that carries its own precondition, so two
+# racing requests cannot both win.
+_FREE = (
+    "(video_state IS NULL OR video_state IN ('declined','confirmed','denied') "
+    "OR (video_state='requested' AND video_at < :request_cutoff) "
+    "OR (video_state='active' AND video_at < :active_cutoff))"
+)
+_VIDEO_ACTIONS = {
+    # action: (new state, who must act, precondition)
+    "request": ("'requested'", "me", _FREE),
+    "cancel":  ("NULL", "requester",
+                "video_state='requested' AND video_by=:me"),
+    "accept":  ("'active'", "other",
+                "video_state='requested' AND video_by=:other AND video_at >= :request_cutoff"),
+    "decline": ("'declined'", "other",
+                "video_state='requested' AND video_by=:other AND video_at >= :request_cutoff"),
+    "confirm": ("'confirmed'", "requester",
+                "video_state='active' AND video_by=:me AND video_at >= :active_cutoff"),
+    "deny":    ("'denied'", "requester",
+                "video_state='active' AND video_by=:me AND video_at >= :active_cutoff"),
+}
+
+
+@bp.route("/video", methods=["POST"])
+def video(code):
+    auth = _authorize(code)
+    if not isinstance(auth, tuple) or len(auth) != 3:
+        return auth
+    conn, row, slot = auth
+    other = "b" if slot == "a" else "a"
+    action = (request.get_json(silent=True) or {}).get("action")
+    if action not in _VIDEO_ACTIONS:
+        return _fail("неизвестное действие", 400)
+
+    if action == "request":
+        ready = (row["a_verified"] and row["b_verified"] and row["a_pub"] and row["b_pub"])
+        if not ready:
+            return _fail("собеседник ещё не готов: видеопроверка станет доступна позже", 409)
+
+    new_state, _who, condition = _VIDEO_ACTIONS[action]
+    now = utcnow()
+    by = ":me" if action == "request" else "video_by"
+    cursor = conn.execute(
+        f"UPDATE sessions SET video_state={new_state}, video_by={by if new_state != 'NULL' else 'NULL'}, "
+        f"video_at=:now WHERE code=:code AND {condition}",
+        {
+            "now": now.isoformat(), "code": code, "me": slot, "other": other,
+            "request_cutoff": (now - VIDEO_REQUEST_TTL).isoformat(),
+            "active_cutoff": (now - VIDEO_ACTIVE_TTL).isoformat(),
+        },
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return _fail("это действие сейчас недоступно", 409)
+    fresh = conn.execute("SELECT * FROM sessions WHERE code=?", (code,)).fetchone()
+    return jsonify({"ok": True, "video": _video_view(fresh)})

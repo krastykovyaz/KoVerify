@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     a_token_hash TEXT,
     b_token_hash TEXT,
     a_pub       TEXT,
-    b_pub       TEXT
+    b_pub       TEXT,
+    video_state TEXT,
+    video_by    TEXT,
+    video_at    TEXT
 );
 CREATE TABLE IF NOT EXISTS room_items (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +123,9 @@ _ADDED_COLUMNS = (
     ("sessions", "b_token_hash", "TEXT"),
     ("sessions", "a_pub", "TEXT"),
     ("sessions", "b_pub", "TEXT"),
+    ("sessions", "video_state", "TEXT"),
+    ("sessions", "video_by", "TEXT"),
+    ("sessions", "video_at", "TEXT"),
 )
 
 

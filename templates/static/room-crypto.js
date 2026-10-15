@@ -23,6 +23,7 @@
   const dec = new TextDecoder()
   const CURVE = { name: 'ECDH', namedCurve: 'P-256' }
   const LABEL = 'verifier-room-v1'
+  const VIDEO_LABEL = 'verifier-room-video-v1'
   const FIELDS = ['login', 'password', 'code', 'key', 'note']
 
   function toB64(bytes) {
@@ -91,6 +92,21 @@
     return cleanFields(parsed.fields)
   }
 
+  // The name of the video meeting, derived from the same ECDH secret as the
+  // message key but under its own label. Both browsers compute the same 128-bit
+  // value; the server only ever sees public keys, so it cannot, and nobody else
+  // can guess it.
+  async function videoRoomName(privateJwk, peerPublicB64, code) {
+    const priv = await crypto.subtle.importKey('jwk', privateJwk, CURVE, false, ['deriveBits'])
+    const pub = await crypto.subtle.importKey('raw', fromB64(peerPublicB64), CURVE, false, [])
+    const secret = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, priv, 256)
+    const material = await crypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveBits'])
+    const bits = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(code), info: enc.encode(VIDEO_LABEL) }, material, 128,
+    ))
+    return 'verifier-' + Array.from(bits, b => b.toString(16).padStart(2, '0')).join('')
+  }
+
   // Ten digits both people read aloud. If the server swapped either public key,
   // the two screens disagree.
   async function safetyCode(publicA, publicB, code) {
@@ -104,5 +120,5 @@
     return `${digits.slice(0, 5)} ${digits.slice(5)}`
   }
 
-  return { FIELDS, generateIdentity, deriveRoomKey, encryptItem, decryptItem, safetyCode, toB64, fromB64 }
+  return { FIELDS, generateIdentity, deriveRoomKey, encryptItem, decryptItem, safetyCode, videoRoomName, toB64, fromB64 }
 })
