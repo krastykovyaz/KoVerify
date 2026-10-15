@@ -73,7 +73,7 @@ def test_service_unit_is_sandboxed_and_cannot_rewrite_its_code():
     assert "User=www-data" in unit and "NoNewPrivileges=true" in unit
 
 
-@pytest.mark.parametrize("name", ["verifier-check", "verifier-backup"])
+@pytest.mark.parametrize("name", ["verifier-check", "verifier-backup", "verifier-purge"])
 def test_timer_units_pair_up(name):
     assert "Type=oneshot" in open(f"deploy/{name}.service").read()
     assert "Persistent=true" in open(f"deploy/{name}.timer").read()
@@ -100,3 +100,11 @@ def test_key_handling_scripts_refuse_unsafe_states():
     assert '"--yes"' in purge          # dry run by default
     encrypt = open("deploy/encrypt-ca-key.sh").read()
     assert "trap 'restore' ERR" in encrypt and "shred -u" in encrypt
+
+
+def test_the_purge_job_is_sandboxed_and_runs_often():
+    service = open("deploy/verifier-purge.service").read()
+    assert "User=www-data" in service and "NoNewPrivileges=true" in service
+    assert "-m verifier.purge" in service and "ReadOnlyPaths=/var/www/verifier/verifier" in service
+    assert "OnCalendar=*:0/5" in open("deploy/verifier-purge.timer").read()
+    assert "verifier-purge.timer" in DEPLOY

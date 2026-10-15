@@ -508,3 +508,169 @@ def test_existing_databases_gain_the_video_columns(tmp_path):
     init_db(str(path))
     cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
     assert {"video_state", "video_by", "video_at"} <= cols
+
+
+# ── closing a room deletes everything in it ────────────────────────────
+
+SCRUBBED = ("user_a", "user_b", "a_name", "b_name", "a_method", "b_method",
+            "a_token_hash", "b_token_hash", "a_pub", "b_pub",
+            "video_state", "video_by", "video_at")
+
+
+def session_row(cfg, code):
+    conn = db(cfg)
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM sessions WHERE code=?", (code,)).fetchone()
+
+
+def populated(ready):
+    """A room with a message each way, a key each and a video request in it."""
+    ready.call("alice", "post", "/items", json=sealed())
+    ready.call("bob", "post", "/items", json=sealed(70))
+    video(ready, "alice", "request")
+    return ready
+
+
+def secrets_in(cfg, code):
+    """Values that exist only inside the room, and so must not survive it.
+
+    Names are deliberately absent: they also live in the users table, which is an
+    enrolment record, not part of any room. The room's own name columns are
+    checked directly in assert_nothing_left.
+    """
+    row = session_row(cfg, code)
+    values = [row[c] for c in ("a_token_hash", "b_token_hash", "a_pub", "b_pub")]
+    assert row["a_name"] and row["b_name"]
+    conn = db(cfg)
+    for iv, ct in conn.execute("SELECT iv, ciphertext FROM room_items WHERE code=?", (code,)):
+        values += [iv, ct]
+    assert all(values) and len(values) >= 8, "the fixture should have put something in every place"
+    return values
+
+
+def assert_nothing_left(cfg, code, leftovers):
+    row = session_row(cfg, code)
+    assert row is not None and row["closed_at"], "a tombstone should remain"
+    for column in SCRUBBED:
+        assert row[column] in (None, ""), f"{column} survived"
+    assert not row["a_verified"] and not row["b_verified"]
+    conn = db(cfg)
+    assert conn.execute("SELECT COUNT(*) FROM room_items WHERE code=?", (code,)).fetchone()[0] == 0
+    dump = "\n".join(conn.iterdump())
+    for value in leftovers:
+        assert value not in dump, f"{value[:24]!r} is still in the database"
+
+
+@pytest.mark.parametrize("closer", ["alice", "bob"])
+def test_either_person_can_close_and_everything_is_deleted(ready, cfg, closer):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    assert ready.call(closer, "post", "/close").status_code == 200
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_after_closing_every_door_answers_closed(ready, cfg):
+    populated(ready)
+    ready.call("alice", "post", "/close")
+    for who in ("alice", "bob"):
+        assert ready.call(who, "get").status_code == 410
+        assert ready.call(who, "post", "/items", json=sealed()).status_code == 410
+        assert ready.call(who, "post", "/key", json={"public_key": public_key()}).status_code == 410
+        assert video(ready, who, "request").status_code == 410
+        assert ready.call(who, "post", "/close").status_code == 410            # nothing left to close
+    assert ready.client["bob"].get(f"/api/session/{ready.code}/status").get_json() == {"status": "closed"}
+
+
+def test_nobody_can_verify_into_a_closed_room(ready, app, cfg, admin):
+    ready.call("alice", "post", "/close")
+    late = ready.client["alice"].post(f"/api/session/{ready.code}/verify/totp", json={
+        "user_id": "alice-001", "code": pyotp.TOTP(ready.secret["alice"]).at(time.time() + 30)}).get_json()
+    assert late["ok"] is False and "закрыта" in late["reason"] and "token" not in late
+    assert_nothing_left(cfg, ready.code, [])
+
+
+def test_closing_needs_a_seat_token(ready, cfg):
+    populated(ready)
+    assert ready.call("alice", "post", "/close", headers={}).status_code == 401
+    assert ready.call("alice", "post", "/close", headers={"X-Room-Token": "x" * 43}).status_code == 401
+    assert session_row(cfg, ready.code)["closed_at"] is None
+    assert len(ready.call("bob", "get").get_json()["items"]) == 2
+
+
+def test_closing_one_room_leaves_another_alone(app, cfg, admin, ready):
+    other = Room(app, cfg, admin, secrets=ready.secret, step=1)
+    other.verify("alice"); other.verify("bob"); other.publish("alice"); other.publish("bob")
+    other.call("alice", "post", "/items", json=sealed())
+    ready.call("alice", "post", "/close")
+    assert other.call("bob", "get").status_code == 200
+    assert len(other.call("bob", "get").get_json()["items"]) == 1
+
+
+def test_a_room_that_runs_out_of_time_is_scrubbed_when_anyone_touches_it(ready, cfg):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    assert ready.call("bob", "get").status_code == 410
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_the_public_status_of_an_expired_room_also_scrubs_it(ready, cfg):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    assert ready.client["bob"].get(f"/api/session/{ready.code}/status").get_json()["status"] == "expired"
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_purge_scrubs_an_expired_room_nobody_comes_back_to(ready, cfg):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    conn = connect(cfg.db_path)
+    purge_expired(conn, 300); conn.commit(); conn.close()
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_purge_leaves_a_live_room_untouched(ready, cfg):
+    populated(ready)
+    conn = connect(cfg.db_path)
+    purge_expired(conn, 300); conn.commit(); conn.close()
+    row = session_row(cfg, ready.code)
+    assert row["closed_at"] is None and row["a_name"] == "Alice" and row["a_pub"]
+    assert len(ready.call("bob", "get").get_json()["items"]) == 2
+
+
+def test_tombstones_are_removed_a_day_later(ready, cfg):
+    ready.call("alice", "post", "/close")
+    conn = db(cfg)
+    conn.execute("UPDATE sessions SET closed_at=? WHERE code=?",
+                 ((utcnow() - timedelta(days=2)).isoformat(), ready.code))
+    conn.commit()
+    c2 = connect(cfg.db_path)
+    purge_expired(c2, 300); c2.commit(); c2.close()
+    assert session_row(cfg, ready.code) is None
+
+
+def test_the_cleanup_job_runs_on_its_own(ready, cfg, monkeypatch, capsys):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    for key, value in {"VERIFIER_HOME": str(cfg.base_dir), "DB_PATH": cfg.db_path, "CA_DIR": cfg.ca_dir,
+                       "FLASK_SECRET": "t" * 64, "ADMIN_SECRET": "test-admin-password-1234"}.items():
+        monkeypatch.setenv(key, value)
+    from verifier.purge import main
+    main()
+    assert "purged" in capsys.readouterr().out
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_existing_databases_gain_the_closed_column(tmp_path):
+    from verifier.db import init_db
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, "
+                 "b_name TEXT, a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.commit(); conn.close()
+    init_db(str(path))
+    assert "closed_at" in {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}

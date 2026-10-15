@@ -7,7 +7,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from ..ca import load_ca_cert
 from ..certs import CertError, authenticate_by_challenge, lookup_user
-from ..db import get_db, parse_ts, purge_expired, utcnow
+from ..db import close_room, get_db, parse_ts, purge_expired, utcnow
 from ..mtls import authenticated_client_cert
 from ..security import client_ip, hash_token, rate_limit
 from ..totp import match_step
@@ -48,6 +48,21 @@ def _load_session(conn, code):
 def _session_expired(row):
     expires = parse_ts(row["expires_at"])
     return expires is not None and utcnow() > expires
+
+
+def _gone(conn, row):
+    """A response when the session can no longer be used, else None.
+
+    An expired room is finished off here the moment anyone touches it, so it
+    never depends on the cleanup job having run.
+    """
+    if _session_expired(row):
+        close_room(conn, row["code"])
+        conn.commit()
+        return jsonify({"ok": False, "reason": "сессия истекла"})
+    if row["closed_at"]:
+        return jsonify({"ok": False, "reason": "сессия закрыта"})
+    return None
 
 
 def record_verification(conn, code, user_id, name, method):
@@ -143,8 +158,13 @@ def session_status(code):
     row = _load_session(get_db(), code)
     if not row:
         return jsonify({"error": "не найдено"}), 404
+    conn = get_db()
     if _session_expired(row):
+        close_room(conn, code)
+        conn.commit()
         return jsonify({"status": "expired"})
+    if row["closed_at"]:
+        return jsonify({"status": "closed"})
     both = bool(row["a_verified"] and row["b_verified"])
     return jsonify({
         "status": "both_verified" if both else "pending",
@@ -187,8 +207,9 @@ def verify_totp(code):
     row = _load_session(conn, code)
     if not row:
         return jsonify({"ok": False, "reason": "сессия не найдена"}), 404
-    if _session_expired(row):
-        return jsonify({"ok": False, "reason": "сессия истекла"})
+    gone = _gone(conn, row)
+    if gone:
+        return gone
 
     user = conn.execute(
         "SELECT * FROM users WHERE id=? AND revoked=0", (user_id,)
@@ -235,8 +256,9 @@ def verify_cert(code):
     row = _load_session(conn, code)
     if not row:
         return jsonify({"ok": False, "reason": "сессия не найдена"}), 404
-    if _session_expired(row):
-        return jsonify({"ok": False, "reason": "сессия истекла"})
+    gone = _gone(conn, row)
+    if gone:
+        return gone
 
     try:
         signature = base64.b64decode(signature_b64 or "", validate=True)
@@ -268,8 +290,9 @@ def verify_mtls(code):
     row = _load_session(conn, code)
     if not row:
         return jsonify({"ok": False, "reason": "сессия не найдена"}), 404
-    if _session_expired(row):
-        return jsonify({"ok": False, "reason": "сессия истекла"})
+    gone = _gone(conn, row)
+    if gone:
+        return gone
 
     try:
         cert = authenticated_client_cert(cfg, load_ca_cert(cfg))

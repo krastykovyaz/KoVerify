@@ -16,7 +16,7 @@ from datetime import timedelta
 from cryptography.hazmat.primitives.asymmetric import ec
 from flask import Blueprint, current_app, jsonify, request
 
-from ..db import get_db, parse_ts, utcnow
+from ..db import close_room, get_db, parse_ts, utcnow
 from ..security import client_ip, constant_time_equals, hash_token, rate_limit
 
 bp = Blueprint("room", __name__, url_prefix="/api/session/<code>/room")
@@ -82,11 +82,14 @@ def _authorize(code):
     if row is None:
         return _fail("комната не найдена", 404)
 
+    # Closed, by hand or by running out of time: say so to everyone, whatever
+    # token they hold. A room that expired is finished off right here.
     expires = parse_ts(row["expires_at"])
-    if expires is not None and utcnow() > expires:
-        conn.execute("DELETE FROM room_items WHERE code=?", (code,))
-        conn.commit()
-        return _fail("комната закрыта, данные удалены", 410)
+    if row["closed_at"] or (expires is not None and utcnow() > expires):
+        if not row["closed_at"]:
+            close_room(conn, code)
+            conn.commit()
+        return _fail("комната закрыта, все данные удалены", 410)
 
     supplied = hash_token(request.headers.get("X-Room-Token", ""))
     slot = None
@@ -278,3 +281,20 @@ def video(code):
         return _fail("это действие сейчас недоступно", 409)
     fresh = conn.execute("SELECT * FROM sessions WHERE code=?", (code,)).fetchone()
     return jsonify({"ok": True, "video": _video_view(fresh)})
+
+
+@bp.route("/close", methods=["POST"])
+def close(code):
+    """Close the room now and delete everything in it, for both people.
+
+    Items, public keys, seat tokens, names, methods and video state are wiped.
+    Both browsers learn of it on their next poll and wipe their own copy of the
+    private key.
+    """
+    auth = _authorize(code)
+    if not isinstance(auth, tuple) or len(auth) != 3:
+        return auth
+    conn, _row, _slot = auth
+    close_room(conn, code)
+    conn.commit()
+    return jsonify({"ok": True})

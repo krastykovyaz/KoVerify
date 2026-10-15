@@ -93,8 +93,17 @@ and each of them can read, copy or delete what is there.
 - **Safety code.** The server could in principle swap a public key, so both
   screens show ten digits derived from both keys. Read them to each other
   aloud; if they differ, send nothing.
-- **Lifetime.** Items exist exactly as long as the room (`SESSION_TTL_MINUTES`,
-  30 by default) and are deleted with it. Copy what you need before then.
+- **Closing deletes everything.** Either person can press "Закрыть комнату и
+  удалить всё", and a room also closes by itself when `SESSION_TTL_MINUTES`
+  (30 by default) runs out; the page counts down. Either way the same routine
+  runs: every shared item, both public keys, both seat-token hashes, the names,
+  verification methods and any video request are wiped, and only a bare
+  tombstone (code and timestamps) remains for a day so a late visitor is told
+  "closed". Both browsers learn of it on their next poll, clear the room from
+  the screen and delete their private key from local storage. An expired room
+  is finished off the moment anyone touches it, and `verifier-purge.timer` does
+  it every five minutes even if nobody does. Copy what you need first: nothing
+  can be recovered.
 - **Limits.** Short text only (12 KB per item), 50 items per room, a key can be
   published once, and polling is rate limited per client and room.
 - **Tests.** `tests/test_room.py` covers access and limits.
@@ -163,12 +172,13 @@ Dependencies are pinned to the versions running in production.
 
 ## Monitoring and backups
 
-`deploy.sh` installs two systemd timers.
+`deploy.sh` installs three systemd timers.
 
 | Timer | Runs | Purpose |
 |---|---|---|
 | `verifier-check.timer` | daily 07:30 | `deploy/check-health.sh`: service, app, `nginx -t`, the public TLS certificate **validated** (not `-k`), CA and user-certificate expiry. A failure shows in `systemctl --failed` and the journal. |
 | `verifier-backup.timer` | daily 03:20 | `deploy/backup.sh`: encrypted database and CA, 14 kept, optionally copied off the host. Needs `BACKUP_PASSPHRASE`. |
+| `verifier-purge.timer` | every 5 min | `python -m verifier.purge`: wipes rooms that have ended, so cleanup never waits for traffic. |
 
 Keep the backup passphrase, and `CA_PASSPHRASE`, somewhere other than this
 machine. A backup that dies with the host it protects is not a backup.

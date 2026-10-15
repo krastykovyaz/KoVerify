@@ -100,6 +100,10 @@
     .vb-good { background: #16a34a; color: #fff }
     .vb-bad { background: #fff; color: #991b1b; border: 1.5px solid #fecaca !important }
     .vb-quiet { background: #e5e7eb; color: #374151 }
+    .countdown { font-size: .78rem; color: #6b7280; margin-bottom: 12px; text-align: center }
+    .close-room { width: 100%; margin-top: 18px; padding: 10px; background: #fff; color: #991b1b;
+                  border: 1.5px solid #fecaca; border-radius: 10px; font: inherit; font-size: .85rem;
+                  font-weight: 600; cursor: pointer }
     .room-error { color: #991b1b; font-size: .8rem; margin-top: 8px; min-height: 1em }
   </style>
 </head>
@@ -139,6 +143,7 @@
   <div class="status-bar pending" id="room-note">⏳ Подготовка…</div>
 
   <div id="room-live" style="display:none">
+    <div class="countdown" id="room-countdown"></div>
     <div class="safety">
       Код сверки
       <b id="room-safety"></b>
@@ -171,6 +176,8 @@
     </form>
 
     <div id="room-items"></div>
+
+    <button type="button" class="close-room" id="room-close">🗑 Закрыть комнату и удалить всё</button>
   </div>
 </div>
 
@@ -200,6 +207,26 @@
     }
   }
 
+  // Whatever way a room ends, nothing about it may stay on the page.
+  function wipeStatusCard(message) {
+    done = true
+    clearTimeout(timer)
+    for (const side of ['a', 'b']) {
+      document.getElementById(`side-${side}`).classList.remove('done')
+      document.getElementById(`icon-${side}`).textContent = '🔒'
+      document.getElementById(`icon-${side}`).classList.remove('pulse')
+      document.getElementById(`name-${side}`).textContent = '—'
+      document.getElementById(`method-${side}`).textContent = ''
+      document.getElementById(`badge-${side}`).className = 'badge-waiting'
+      document.getElementById(`badge-${side}`).textContent = 'закрыта'
+    }
+    const bar = document.getElementById('status-bar')
+    bar.className = 'status-bar expired'
+    bar.textContent = message
+    document.getElementById('hint').textContent = ''
+    document.getElementById('btn-new').style.display = 'block'
+  }
+
   async function poll() {
     if (done) return
     let data
@@ -207,6 +234,8 @@
       data = await fetch(`/api/session/${CODE}/status`).then(r => r.json())
     } catch { timer = setTimeout(poll, 3000); return }
 
+    if (data.error) { wipeStatusCard('Комната не найдена или уже удалена'); return }
+    if (data.status === 'closed') { wipeStatusCard('🔒 Комната закрыта: все данные удалены'); return }
     setSide('a', data.side_a)
     setSide('b', data.side_b)
 
@@ -219,11 +248,7 @@
       document.getElementById('hint').textContent = 'Можете передать данные друг другу ниже или общаться в любом мессенджере'
       document.getElementById('btn-new').style.display = 'block'
     } else if (data.status === 'expired') {
-      done = true
-      bar.className   = 'status-bar expired'
-      bar.textContent = '❌ Сессия истекла — создайте новую'
-      document.getElementById('hint').textContent = ''
-      document.getElementById('btn-new').style.display = 'block'
+      wipeStatusCard('❌ Сессия истекла: все данные удалены')
     } else {
       // Показываем кто уже прошёл, кто ещё нет
       const aOk = data.side_a?.verified
@@ -275,7 +300,7 @@
     return { status: res.status, body }
   }
 
-  function closeRoom() {
+  function closeRoom(message) {
     roomClosed = true
     try { localStorage.removeItem(SEAT_KEY) } catch (e) {}      // the private key goes with it
     seat = roomKey = null
@@ -283,7 +308,19 @@
     document.getElementById('room-items').textContent = ''
     shown.clear()
     flashTitle(false)
-    setRoomNote('Комната закрыта: данные удалены с сервера. То, что вы скопировали, осталось только у вас.', 'expired')
+    document.getElementById('room-countdown').textContent = ''
+    wipeStatusCard('🔒 Комната закрыта: все данные удалены')
+    setRoomNote((message || 'Комната закрыта') + ' То, что вы скопировали, осталось только у вас.', 'expired')
+  }
+
+  async function closeRoomNow() {
+    if (!confirm('Закрыть комнату? Всё, что в ней есть, удалится у обоих, это нельзя отменить.')) return
+    const { status, body } = await roomApi('/close', { method: 'POST' })
+    if (status === 410 || (body && body.ok)) {
+      closeRoom('Вы закрыли комнату: всё удалено с сервера и из этого браузера.')
+    } else {
+      setRoomError((body && body.reason) || 'Не удалось закрыть комнату.')
+    }
   }
 
   function copyButton(getValue) {
@@ -359,6 +396,10 @@
     }
     setRoomNote('')
     document.getElementById('room-live').style.display = 'block'
+    const left = Math.round((new Date(state.expires_at) - Date.now()) / 60000)
+    document.getElementById('room-countdown').textContent = left < 1
+      ? 'Комната закроется меньше чем через минуту. Всё будет удалено.'
+      : `Комната закроется через ${left} мин. Всё будет удалено.`
     await renderVideo(state)
 
     const list = document.getElementById('room-items')
@@ -479,7 +520,7 @@
     if (roomClosed) return
     try {
       const { status, body } = await roomApi('', { method: 'GET' })
-      if (status === 410) { closeRoom(); return }
+      if (status === 410) { closeRoom((body && body.reason ? body.reason[0].toUpperCase() + body.reason.slice(1) : 'Комната закрыта') + '.'); return }
       if (status === 401) {
         setRoomNote('Нет доступа: откройте комнату на том устройстве, где вы проходили верификацию.', 'expired')
       } else if (body && body.ok) {
@@ -531,6 +572,7 @@
       saveSeat()
     }
     document.getElementById('room-form').addEventListener('submit', sendItem)
+    document.getElementById('room-close').onclick = closeRoomNow
     document.getElementById('f-password-toggle').onclick = function () {
       const field = document.getElementById('f-password')
       field.type = field.type === 'password' ? 'text' : 'password'

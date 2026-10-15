@@ -199,7 +199,8 @@ fi
 # ── System configuration ─────────────────────────────────────────────
 log "installing unit and nginx configuration"
 run install -m 644 "$SRC/deploy/verifier.service" /etc/systemd/system/verifier.service
-for unit in verifier-check.service verifier-check.timer verifier-backup.service verifier-backup.timer; do
+for unit in verifier-check.service verifier-check.timer verifier-backup.service verifier-backup.timer \
+            verifier-purge.service verifier-purge.timer; do
   run install -m 644 "$SRC/deploy/$unit" "/etc/systemd/system/$unit"
 done
 run mkdir -p "$NGINX_SNIPPETS"
@@ -276,6 +277,7 @@ fi
 # ── Scheduled jobs ───────────────────────────────────────────────────
 run systemctl daemon-reload
 run systemctl enable --now verifier-check.timer
+run systemctl enable --now verifier-purge.timer
 if [ -n "${BACKUP_PASSPHRASE:-}" ]; then
   run systemctl enable --now verifier-backup.timer
 fi

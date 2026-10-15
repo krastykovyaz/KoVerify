@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     b_pub       TEXT,
     video_state TEXT,
     video_by    TEXT,
-    video_at    TEXT
+    video_at    TEXT,
+    closed_at   TEXT
 );
 CREATE TABLE IF NOT EXISTS room_items (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +127,7 @@ _ADDED_COLUMNS = (
     ("sessions", "video_state", "TEXT"),
     ("sessions", "video_by", "TEXT"),
     ("sessions", "video_at", "TEXT"),
+    ("sessions", "closed_at", "TEXT"),
 )
 
 
@@ -143,6 +145,26 @@ def init_db(path):
         conn.close()
 
 
+# Everything a room knows about the people in it. Closing a room, and a room
+# running out of time, both blank all of this and keep only a bare tombstone
+# (code and timestamps), so a late visitor is told "closed" instead of finding a
+# stale record, and a code is not reissued while its tombstone exists.
+_SCRUB = (
+    "user_a=NULL, user_b=NULL, a_verified=0, b_verified=0, a_name=NULL, b_name=NULL, "
+    "a_method=NULL, b_method=NULL, a_token_hash=NULL, b_token_hash=NULL, "
+    "a_pub=NULL, b_pub=NULL, video_state=NULL, video_by=NULL, video_at=NULL"
+)
+
+
+def close_room(conn, code):
+    """Delete everything in a room. Safe to call twice."""
+    conn.execute("DELETE FROM room_items WHERE code=?", (code,))
+    conn.execute(
+        f"UPDATE sessions SET {_SCRUB}, closed_at=COALESCE(closed_at, ?) WHERE code=?",
+        (utcnow().isoformat(), code),
+    )
+
+
 def purge_expired(conn, nonce_ttl_seconds):
     """Delete rows that are past their useful life. Keeps the tables bounded."""
     now = utcnow()
@@ -154,17 +176,23 @@ def purge_expired(conn, nonce_ttl_seconds):
         "DELETE FROM rate_limits WHERE attempted_at < ?",
         ((now - timedelta(hours=24)).isoformat(),),
     )
-    # Shared items live exactly as long as the room does. They are ciphertext
-    # the server cannot read, but there is no reason to keep even that.
+    # A room that has run out of time is closed exactly like one closed by hand:
+    # nothing about it survives except a tombstone. This does not wait for
+    # anyone to open the room again.
     conn.execute(
-        "DELETE FROM room_items WHERE code IN "
-        "(SELECT code FROM sessions WHERE expires_at < ?) "
-        "OR code NOT IN (SELECT code FROM sessions)",
-        (now.isoformat(),),
+        f"UPDATE sessions SET {_SCRUB}, closed_at=? "
+        "WHERE expires_at < ? AND closed_at IS NULL",
+        (now.isoformat(), now.isoformat()),
     )
     conn.execute(
-        "DELETE FROM sessions WHERE expires_at < ?",
-        ((now - timedelta(days=1)).isoformat(),),
+        "DELETE FROM room_items WHERE code IN "
+        "(SELECT code FROM sessions WHERE closed_at IS NOT NULL) "
+        "OR code NOT IN (SELECT code FROM sessions)"
+    )
+    # Tombstones go a day later.
+    conn.execute(
+        "DELETE FROM sessions WHERE expires_at < ? OR closed_at < ?",
+        ((now - timedelta(days=1)).isoformat(),) * 2,
     )
     # The private-key bundle is only needed until the one-time link is spent or
     # lapses. Keeping it longer just leaves a second copy of every user's key
