@@ -121,12 +121,6 @@ def _credentials_response(cfg, now, user_id, name, totp_secret, download_url,
                           p12_password, cert_pem, serial_hex):
     totp_uri = pyotp.TOTP(totp_secret).provisioning_uri(
         name=name, issuer_name="Verifier")
-    # Everything in one scan: the same link with the certificate password after
-    # the "#". Browsers never send the fragment to a server, so it is absent from
-    # nginx logs, the application and the database; only the person holding the
-    # link or QR can read it. The plain link stays available for handing the
-    # password over separately.
-    download_url_full = f"{download_url}#p={p12_password}"
     return jsonify({
         "ok": True,
         "user_id": user_id,
@@ -135,8 +129,6 @@ def _credentials_response(cfg, now, user_id, name, totp_secret, download_url,
         "qr_totp_b64": qr_b64(totp_uri),
         "download_url": download_url,
         "qr_download_b64": qr_b64(download_url),
-        "download_url_full": download_url_full,
-        "qr_download_full_b64": qr_b64(download_url_full),
         "p12_password": p12_password,
         "cert_pem": cert_pem,
         "serial": serial_hex,

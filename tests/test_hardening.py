@@ -352,3 +352,10 @@ def test_an_encrypted_ca_key_works_with_its_passphrase(tmp_path):
 def test_production_still_generates_a_4096_bit_ca_key():
     """The test suite shrinks RSA keys for speed; production must not."""
     assert "key_size=4096" in open("verifier/ca.py").read()
+
+
+def test_no_page_relies_on_the_global_event_object():
+    """Safari has never implemented it; it silently broke every copy button."""
+    for path in ("templates/admin.html", "templates/download.html",
+                 "templates/verify.html", "templates/index.html", "templates/result.html"):
+        assert "event.target" not in open(path).read(), path

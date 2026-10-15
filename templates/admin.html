@@ -346,20 +346,8 @@
   <div class="modal">
     <h2 id="modal-title">Ключи участника</h2>
 
-    <div class="cred-section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <span class="cred-label" style="margin:0">Логин (ID)</span>
-      <span id="modal-user-id" style="font-family:monospace;font-size:1.1rem;font-weight:700;color:#a5b4fc"></span>
-      <button class="copy-btn" style="position:static" onclick="copyText('modal-user-id', this)">копировать</button>
-    </div>
-
     <!-- ШАГ 1: Главное — QR для установки на устройство -->
     <div class="cred-section" id="modal-download-section">
-      <label id="modal-all-at-once-row" style="display:flex;gap:8px;align-items:flex-start;font-size:.8rem;color:#c7d2fe;margin-bottom:10px;cursor:pointer">
-        <input type="checkbox" id="modal-all-at-once" checked onchange="renderDownload()" style="margin-top:3px">
-        <span><strong>Всё сразу.</strong> Пароль сертификата внутри ссылки: участник отсканирует один QR и
-        увидит на своей странице логин, пароль и ключ для кода. Снимите галочку, если пароль
-        нужно сказать устно. Не показывайте этот QR никому, кроме самого участника.</span>
-      </label>
       <div class="cred-label" style="color:#86efac;font-size:.8rem">
         ШАГ 1 — участник сканирует этот QR своим телефоном
       </div>
@@ -409,7 +397,6 @@
     </div>
 
     <div class="modal-actions">
-      <button class="btn btn-ghost" style="flex:1" id="modal-copy-all" onclick="copyAll(this)">Скопировать всё</button>
       <button class="btn btn-close-modal" style="flex:1" onclick="closeModal()">Закрыть</button>
     </div>
   </div>
@@ -480,20 +467,19 @@
   // ── Modal ────────────────────────────────────────────────
 
   function openModal(data, isNew) {
-    currentUser = data
     document.getElementById('modal-title').textContent =
       isNew ? `Ключи выданы: ${data.name}` : `Ключи: ${data.name}`
 
-    document.getElementById('modal-user-id').textContent = data.user_id
     // QR для скачивания .p12 на устройство (главный)
     const dlSection = document.getElementById('modal-download-section')
     if (data.qr_download_b64 && data.download_url) {
       dlSection.style.display = 'block'
+      document.getElementById('modal-qr-download').src =
+        `data:image/png;base64,${data.qr_download_b64}`
+      const dlLink = document.getElementById('modal-download-url')
+      dlLink.href = data.download_url
+      dlLink.textContent = data.download_url
       document.getElementById('modal-p12-password').textContent = data.p12_password || '—'
-      // Without a password (an existing user) there is nothing to put in the link.
-      const canBundle = Boolean(data.download_url_full)
-      document.getElementById('modal-all-at-once-row').style.display = canBundle ? 'flex' : 'none'
-      renderDownload()
     } else {
       dlSection.style.display = 'none'
     }
@@ -504,34 +490,6 @@
     document.getElementById('modal-totp-text').textContent = data.totp_secret
 
     document.getElementById('modal').classList.add('open')
-  }
-
-  // Show either the plain link or the one that also carries the password.
-  function renderDownload() {
-    const data = currentUser
-    if (!data) return
-    const all = Boolean(data.download_url_full) &&
-                document.getElementById('modal-all-at-once').checked
-    const url = all ? data.download_url_full : data.download_url
-    const qr  = all ? data.qr_download_full_b64 : data.qr_download_b64
-    document.getElementById('modal-qr-download').src = `data:image/png;base64,${qr}`
-    const link = document.getElementById('modal-download-url')
-    link.href = url
-    link.textContent = url
-  }
-
-  // Everything a person needs, as plain text for a messenger or a printout.
-  function copyAll(button) {
-    const d = currentUser
-    if (!d) return
-    const all = Boolean(d.download_url_full) && document.getElementById('modal-all-at-once').checked
-    const lines = [`Логин (ID): ${d.user_id}`]
-    if (d.p12_password) lines.push(`Пароль сертификата: ${d.p12_password}`)
-    lines.push(`Секрет для кода (Google Authenticator): ${d.totp_secret}`)
-    if (d.download_url) lines.push(`Ссылка (одноразовая): ${all ? d.download_url_full : d.download_url}`)
-    navigator.clipboard.writeText(lines.join('\n'))
-    button.textContent = '✓ Скопировано'
-    setTimeout(() => button.textContent = 'Скопировать всё', 1500)
   }
 
   function closeModal() {

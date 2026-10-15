@@ -156,35 +156,6 @@
       flex-shrink: 0;
     }
 
-    .mine-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 0;
-      border-top: 1px solid #2d2d4e;
-    }
-    .mine-row:first-of-type { border-top: none }
-    .mine-label { font-size: .75rem; color: #888; width: 110px; flex-shrink: 0 }
-    .mine-value {
-      font-family: monospace;
-      font-size: 1.15rem;
-      font-weight: 700;
-      color: #fcd34d;
-      letter-spacing: 2px;
-      word-break: break-all;
-      flex: 1;
-    }
-    .mine-value.id { color: #a5b4fc }
-    .mine-row button {
-      background: #2d2d4e;
-      border: none;
-      border-radius: 5px;
-      padding: 5px 10px;
-      font-size: .75rem;
-      color: #a0a0c0;
-      cursor: pointer;
-      flex-shrink: 0;
-    }
     .warning {
       background: #431407;
       border: 1px solid #7c2d12;
@@ -214,33 +185,6 @@
     <div class="icon">🔐</div>
     <h1>Привет, {{ name }}!</h1>
     <p>Установите сертификат на устройство — это займёт 1 минуту</p>
-  </div>
-
-  <!-- Всё нужное сразу: логин, пароль сертификата, ключ для кода -->
-  <div class="card" id="mine">
-    <div class="card-title">Ваши данные для входа</div>
-    <div class="mine-row">
-      <div class="mine-label">Логин (ID)</div>
-      <div class="mine-value id" id="mine-id">{{ user_id }}</div>
-      <button onclick="copyText('mine-id', this)">копировать</button>
-    </div>
-    <div class="mine-row" id="mine-pw-row" style="display:none">
-      <div class="mine-label">Пароль сертификата</div>
-      <div class="mine-value" id="mine-pw"></div>
-      <button onclick="copyText('mine-pw', this)">копировать</button>
-    </div>
-    <div class="mine-row">
-      <div class="mine-label">Ключ для кода</div>
-      <div class="mine-value" id="mine-totp" style="font-size:.9rem;letter-spacing:1px">{{ totp_secret }}</div>
-      <button onclick="copyText('mine-totp', this)">копировать</button>
-    </div>
-    <p style="font-size:.78rem;color:#777;margin-top:10px;line-height:1.5" id="mine-note-oral">
-      Пароль сертификата вам назовёт администратор.
-    </p>
-    <p style="font-size:.78rem;color:#86efac;margin-top:10px;line-height:1.5;display:none" id="mine-note-shown">
-      Не закрывайте и не перезагружайте страницу, пока не установите сертификат:
-      пароль хранится только в этой ссылке и повторно не покажется.
-    </p>
   </div>
 
   <!-- Platform selector — автоопределение -->
@@ -276,15 +220,11 @@
       <a class="btn-download" href="/download/{{ token }}/mobileconfig">
         ⬇ Скачать профиль для iOS (.mobileconfig)
       </a>
-      <div class="warning" id="warn-oral">
+      <div class="warning">
         ⚠ Пароль от сертификата администратор назвал вам устно при встрече —
         он нигде не сохранён в файле профиля и не может быть показан здесь повторно.
         Если вы его не расслышали или потеряли, попросите администратора выпустить
         ключи заново.
-      </div>
-      <div class="warning" id="warn-shown" style="display:none">
-        ⚠ Пароль сертификата указан выше, в блоке «Ваши данные». Вы введёте его на шаге 5,
-        когда iOS спросит пароль. Не закрывайте эту страницу до конца установки.
       </div>
     </div>
   </div>
@@ -404,27 +344,6 @@
     button.textContent = '✓'
     setTimeout(() => button.textContent = 'копировать', 1500)
   }
-
-  function copyText(id, button) {
-    navigator.clipboard.writeText(document.getElementById(id).textContent.trim())
-    const label = button.textContent
-    button.textContent = '✓'
-    setTimeout(() => button.textContent = label, 1500)
-  }
-
-  // The administrator may put the certificate password after the "#" of the
-  // link. Browsers never send a fragment to the server, so it is not in any log
-  // or in the database. It is only ever written with textContent.
-  ;(function showPasswordFromLink() {
-    const pw = new URLSearchParams(location.hash.slice(1)).get('p')
-    if (!pw || !/^[A-Za-z0-9]{4,64}$/.test(pw)) return
-    document.getElementById('mine-pw').textContent = pw
-    document.getElementById('mine-pw-row').style.display = 'flex'
-    document.getElementById('mine-note-oral').style.display = 'none'
-    document.getElementById('mine-note-shown').style.display = 'block'
-    document.getElementById('warn-oral').style.display = 'none'
-    document.getElementById('warn-shown').style.display = 'block'
-  })()
 </script>
 </body>
 </html>
