@@ -75,6 +75,8 @@ class Config:
         self.rl_totp = (int(env.get("RL_TOTP_MAX", "10")), 300)
         self.rl_mtls = (int(env.get("RL_MTLS_MAX", "20")), 300)
         self.rl_status = (int(env.get("RL_STATUS_MAX", "300")), 60)
+        # Per client and room: a page polls every 3 s, so 20 a minute each.
+        self.rl_room = (int(env.get("RL_ROOM_MAX", "240")), 60)
 
         self._validate()
 

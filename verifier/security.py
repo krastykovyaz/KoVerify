@@ -1,4 +1,5 @@
 """Authentication helpers: constant-time comparison and durable rate limiting."""
+import hashlib
 import hmac
 import ipaddress
 import time
@@ -14,6 +15,11 @@ def constant_time_equals(a, b):
     if a is None or b is None:
         return False
     return hmac.compare_digest(str(a).encode(), str(b).encode())
+
+
+def hash_token(token):
+    """Tokens are random 256-bit values, so a plain hash is enough to store."""
+    return hashlib.sha256(str(token).encode()).hexdigest()
 
 
 def _proxy_vouched_for(cfg):

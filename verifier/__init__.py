@@ -56,11 +56,13 @@ def create_app(config=None, testing=False):
     from .blueprints.api import bp as api_bp
     from .blueprints.download import bp as download_bp
     from .blueprints.pages import bp as pages_bp
+    from .blueprints.room import bp as room_bp
 
     app.register_blueprint(pages_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(download_bp)
+    app.register_blueprint(room_bp)
 
     @app.after_request
     def set_security_headers(response):

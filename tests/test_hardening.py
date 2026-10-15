@@ -347,3 +347,8 @@ def test_an_encrypted_ca_key_works_with_its_passphrase(tmp_path):
     wrong = make_config(tmp_path, CA_PASSPHRASE="wrong")
     with pytest.raises(ConfigError, match="CA_PASSPHRASE"):
         create_app(wrong, testing=True)
+
+
+def test_production_still_generates_a_4096_bit_ca_key():
+    """The test suite shrinks RSA keys for speed; production must not."""
+    assert "key_size=4096" in open("verifier/ca.py").read()

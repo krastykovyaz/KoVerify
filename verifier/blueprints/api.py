@@ -9,7 +9,7 @@ from ..ca import load_ca_cert
 from ..certs import CertError, authenticate_by_challenge, lookup_user
 from ..db import get_db, parse_ts, purge_expired, utcnow
 from ..mtls import authenticated_client_cert
-from ..security import client_ip, rate_limit
+from ..security import client_ip, hash_token, rate_limit
 from ..totp import match_step
 
 bp = Blueprint("api", __name__)
@@ -81,6 +81,25 @@ def record_verification(conn, code, user_id, name, method):
             return slot
     conn.commit()
     return None
+
+
+def claim_slot(conn, code, user_id, name, method):
+    """Claim a slot and issue the credential that proves which side this is.
+
+    Without it anyone who learned the eight-character code could read the room.
+    Only a hash is stored; the token itself is returned once, to the browser
+    that just passed verification.
+    """
+    slot = record_verification(conn, code, user_id, name, method)
+    if slot is None:
+        return None, None
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        f"UPDATE sessions SET {slot}_token_hash=? WHERE code=?",
+        (hash_token(token), code),
+    )
+    conn.commit()
+    return slot, token
 
 
 @bp.route("/api/session/create", methods=["POST"])
@@ -192,10 +211,10 @@ def verify_totp(code):
         return jsonify({"ok": False,
                         "reason": "этот код уже использован, дождитесь следующего"})
 
-    slot = record_verification(conn, code, user_id, user["name"], "TOTP")
+    slot, token = claim_slot(conn, code, user_id, user["name"], "TOTP")
     if slot is None:
         return jsonify({"ok": False, "reason": "уже верифицированы или мест нет"})
-    return jsonify({"ok": True, "name": user["name"], "slot": slot})
+    return jsonify({"ok": True, "name": user["name"], "slot": slot, "token": token})
 
 
 @bp.route("/api/session/<code>/verify/cert", methods=["POST"])
@@ -231,10 +250,10 @@ def verify_cert(code):
     except CertError as exc:
         return jsonify({"ok": False, "reason": str(exc)})
 
-    slot = record_verification(conn, code, user["id"], user["name"], "Сертификат")
+    slot, token = claim_slot(conn, code, user["id"], user["name"], "Сертификат")
     if slot is None:
         return jsonify({"ok": False, "reason": "уже верифицированы или мест нет"})
-    return jsonify({"ok": True, "name": user["name"], "slot": slot})
+    return jsonify({"ok": True, "name": user["name"], "slot": slot, "token": token})
 
 
 @bp.route("/api/session/<code>/verify/mtls", methods=["POST"])
@@ -262,7 +281,8 @@ def verify_mtls(code):
             "hint": "убедитесь что HTTPS включён и сертификат установлен на устройстве",
         })
 
-    slot = record_verification(conn, code, user["id"], user["name"], "mTLS (авто)")
+    slot, token = claim_slot(conn, code, user["id"], user["name"], "mTLS (авто)")
     if slot is None:
         return jsonify({"ok": False, "reason": "уже верифицированы в этой сессии"})
-    return jsonify({"ok": True, "name": user["name"], "method": "mtls", "slot": slot})
+    return jsonify({"ok": True, "name": user["name"], "method": "mtls", "slot": slot,
+                    "token": token})

@@ -31,7 +31,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     a_method    TEXT,
     b_method    TEXT,
     created_at  TEXT,
-    expires_at  TEXT
+    expires_at  TEXT,
+    a_token_hash TEXT,
+    b_token_hash TEXT,
+    a_pub       TEXT,
+    b_pub       TEXT
+);
+CREATE TABLE IF NOT EXISTS room_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL,
+    from_slot  TEXT NOT NULL,
+    iv         TEXT NOT NULL,
+    ciphertext TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS nonces (
     nonce      TEXT PRIMARY KEY,
@@ -53,6 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_users_serial ON users(serial);
 CREATE INDEX IF NOT EXISTS idx_rl_lookup ON rate_limits(bucket, identifier, attempted_at);
 CREATE INDEX IF NOT EXISTS idx_nonces_created ON nonces(created_at);
 CREATE INDEX IF NOT EXISTS idx_dt_user ON download_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_room_items_code ON room_items(code);
 """
 
 
@@ -103,6 +116,10 @@ def close_db(exc=None):
 # a populated production database upgrades in place.
 _ADDED_COLUMNS = (
     ("users", "totp_last_step", "INTEGER"),
+    ("sessions", "a_token_hash", "TEXT"),
+    ("sessions", "b_token_hash", "TEXT"),
+    ("sessions", "a_pub", "TEXT"),
+    ("sessions", "b_pub", "TEXT"),
 )
 
 
@@ -130,6 +147,14 @@ def purge_expired(conn, nonce_ttl_seconds):
     conn.execute(
         "DELETE FROM rate_limits WHERE attempted_at < ?",
         ((now - timedelta(hours=24)).isoformat(),),
+    )
+    # Shared items live exactly as long as the room does. They are ciphertext
+    # the server cannot read, but there is no reason to keep even that.
+    conn.execute(
+        "DELETE FROM room_items WHERE code IN "
+        "(SELECT code FROM sessions WHERE expires_at < ?) "
+        "OR code NOT IN (SELECT code FROM sessions)",
+        (now.isoformat(),),
     )
     conn.execute(
         "DELETE FROM sessions WHERE expires_at < ?",

@@ -73,6 +73,35 @@ client supply its own `X-SSL-Client-Cert` and impersonate any enrolled user,
 because nginx discards inherited `proxy_set_header` directives as soon as a
 location defines one of its own.
 
+## Sharing in the room
+
+After both people pass verification the room page offers **Обмен данными**: a
+login, password, code, key and note can be sent to the other person in one go,
+and each of them can read, copy or delete what is there.
+
+- **Who is in the room.** Verifying hands the browser a random seat token; the
+  server keeps only its hash. Every room call needs it, so knowing the
+  eight-character code reveals nothing. The token and the private key live in
+  that browser's local storage and are wiped when the room closes.
+- **End-to-end encrypted.** Each browser makes an ECDH P-256 key pair and
+  publishes only the public half. Messages are AES-256-GCM under a key derived
+  from the shared secret (HKDF, salted with the room code), with the room code
+  and sender bound in as authenticated data, so a ciphertext cannot be moved to
+  another room or made to look like it came from the other person. The server
+  stores ciphertext only: a database leak, a backup or a log reveals nothing.
+  The code is in `templates/static/room-crypto.js`.
+- **Safety code.** The server could in principle swap a public key, so both
+  screens show ten digits derived from both keys. Read them to each other
+  aloud; if they differ, send nothing.
+- **Lifetime.** Items exist exactly as long as the room (`SESSION_TTL_MINUTES`,
+  30 by default) and are deleted with it. Copy what you need before then.
+- **Limits.** Short text only (12 KB per item), 50 items per room, a key can be
+  published once, and polling is rate limited per client and room.
+- **Tests.** `tests/test_room.py` covers access and limits.
+  `tests/test_room_e2e.py` runs two simulated browsers through the real client
+  crypto against a live server, including tampering, cross-room replay and a
+  swapped key. It needs Node.js and is skipped without it.
+
 ## Deploying
 
 ```bash

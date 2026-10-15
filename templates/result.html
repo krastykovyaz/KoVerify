@@ -9,7 +9,8 @@
     body {
       font-family: system-ui, -apple-system, sans-serif;
       background: #f0f2f5; min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
+      display: flex; flex-direction: column; gap: 16px;
+      align-items: center; justify-content: center;
       padding: 16px;
     }
     .card {
@@ -58,6 +59,34 @@
 
     .pulse { animation: pulse 1.6s ease-in-out infinite }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    .safety { background: #f5f3ff; border: 1.5px solid #ddd6fe; border-radius: 12px;
+              padding: 12px 14px; margin-bottom: 16px; text-align: center }
+    .safety b { display: block; font: 700 1.5rem ui-monospace, monospace; color: #4c1d95;
+                letter-spacing: 3px; margin: 4px 0 }
+    .safety small { color: #6b7280; font-size: .75rem; line-height: 1.4; display: block }
+    .field { margin-bottom: 10px }
+    .field label { display: block; font-size: .75rem; color: #6b7280; margin-bottom: 3px }
+    .field input, .field textarea { width: 100%; padding: 10px 12px; border: 1.5px solid #e5e7eb;
+        border-radius: 10px; font: inherit; font-size: .95rem }
+    .field textarea { min-height: 60px; resize: vertical }
+    .field .row { display: flex; gap: 8px; align-items: center }
+    .field .row input { flex: 1 }
+    .mini { background: #f3f4f6; border: none; border-radius: 8px; padding: 6px 10px;
+            font-size: .75rem; color: #374151; cursor: pointer; flex-shrink: 0 }
+    .send { width: 100%; padding: 12px; background: #4338ca; color: #fff; border: none;
+            border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer }
+    .send:disabled { opacity: .5 }
+    .item { border: 1.5px solid #e5e7eb; border-radius: 12px; padding: 12px; margin-top: 12px }
+    .item.mine { background: #fafafa }
+    .item-head { display: flex; justify-content: space-between; align-items: center;
+                 font-size: .75rem; color: #6b7280; margin-bottom: 8px }
+    .item-row { display: flex; align-items: center; gap: 8px; padding: 6px 0;
+                border-top: 1px solid #f3f4f6 }
+    .item-row:first-of-type { border-top: none }
+    .item-label { width: 70px; flex-shrink: 0; font-size: .72rem; color: #9ca3af }
+    .item-value { flex: 1; font-family: ui-monospace, monospace; font-size: .95rem; color: #111;
+                  word-break: break-all; white-space: pre-wrap }
+    .room-error { color: #991b1b; font-size: .8rem; margin-top: 8px; min-height: 1em }
   </style>
 </head>
 <body>
@@ -89,6 +118,41 @@
   <a href="/" class="btn-new" id="btn-new" style="display:none">← Создать новую сессию</a>
 </div>
 
+<div class="card" id="room" style="display:none">
+  <h1>Обмен данными</h1>
+  <p class="sub">Видно только вам двоим. Шифруется в ваших браузерах: сервер хранит лишь
+     нечитаемый шифртекст и удаляет его вместе с комнатой.</p>
+  <div class="status-bar pending" id="room-note">⏳ Подготовка…</div>
+
+  <div id="room-live" style="display:none">
+    <div class="safety">
+      Код сверки
+      <b id="room-safety"></b>
+      <small>Назовите его друг другу вслух. Если коды не совпали, ничего не отправляйте:
+      кто-то вмешался.</small>
+    </div>
+
+    <form id="room-form" autocomplete="off">
+      <div class="field"><label for="f-login">Логин</label>
+        <input id="f-login" maxlength="200" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div class="field"><label for="f-password">Пароль</label>
+        <div class="row"><input id="f-password" type="password" maxlength="500" autocomplete="new-password" autocapitalize="off" spellcheck="false">
+          <button type="button" class="mini" id="f-password-toggle">показать</button></div></div>
+      <div class="field"><label for="f-code">Код</label>
+        <input id="f-code" maxlength="200" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div class="field"><label for="f-key">Ключ</label>
+        <input id="f-key" maxlength="2000" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div class="field"><label for="f-note">Заметка</label>
+        <textarea id="f-note" maxlength="2000"></textarea></div>
+      <button class="send" type="submit" id="room-send">Отправить собеседнику</button>
+      <div class="room-error" id="room-error"></div>
+    </form>
+
+    <div id="room-items"></div>
+  </div>
+</div>
+
+<script src="/static/room-crypto.js?v=1"></script>
 <script>
   const CODE  = {{ code|tojson }}
   let   done  = false
@@ -130,7 +194,7 @@
       done = true
       bar.className   = 'status-bar verified'
       bar.textContent = '✅ Оба верифицированы — можете доверять друг другу'
-      document.getElementById('hint').textContent = 'Можете закрыть страницу и общаться в любом мессенджере'
+      document.getElementById('hint').textContent = 'Можете передать данные друг другу ниже или общаться в любом мессенджере'
       document.getElementById('btn-new').style.display = 'block'
     } else if (data.status === 'expired') {
       done = true
@@ -147,6 +211,213 @@
       timer = setTimeout(poll, 2000)
     }
   }
+
+  // ── Обмен данными в комнате ───────────────────────────────────────
+  const SEAT_KEY  = 'room:' + CODE
+  const FIELD_LABELS = { login: 'Логин', password: 'Пароль', code: 'Код', key: 'Ключ', note: 'Заметка' }
+  const RC = window.RoomCrypto
+  let seat = null, roomKey = null, roomKeyPeer = null, roomClosed = false
+  const shown = new Map()                       // item id -> DOM node
+
+  function loadSeat() {
+    try { return JSON.parse(localStorage.getItem(SEAT_KEY) || 'null') } catch (e) { return null }
+  }
+  function saveSeat() {
+    try { localStorage.setItem(SEAT_KEY, JSON.stringify(seat)) } catch (e) {}
+  }
+  function forgetStaleRooms() {
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const name = localStorage.key(i)
+        if (!name || !name.startsWith('room:')) continue
+        const saved = (JSON.parse(localStorage.getItem(name) || '{}') || {}).savedAt || 0
+        if (Date.now() - saved > 24 * 3600 * 1000) localStorage.removeItem(name)
+      }
+    } catch (e) {}
+  }
+
+  function setRoomNote(text, kind) {
+    const el = document.getElementById('room-note')
+    el.textContent = text
+    el.className = 'status-bar ' + (kind || 'pending')
+    el.style.display = text ? 'block' : 'none'
+  }
+  function setRoomError(text) { document.getElementById('room-error').textContent = text || '' }
+
+  async function roomApi(path, options) {
+    const res = await fetch(`/api/session/${CODE}/room${path}`, Object.assign({}, options, {
+      headers: { 'Content-Type': 'application/json', 'X-Room-Token': seat.token },
+    }))
+    let body = null
+    try { body = await res.json() } catch (e) {}
+    return { status: res.status, body }
+  }
+
+  function closeRoom() {
+    roomClosed = true
+    try { localStorage.removeItem(SEAT_KEY) } catch (e) {}      // the private key goes with it
+    seat = roomKey = null
+    document.getElementById('room-live').style.display = 'none'
+    document.getElementById('room-items').textContent = ''
+    shown.clear()
+    setRoomNote('Комната закрыта: данные удалены с сервера. То, что вы скопировали, осталось только у вас.', 'expired')
+  }
+
+  function copyButton(getValue) {
+    const b = document.createElement('button')
+    b.type = 'button'; b.className = 'mini'; b.textContent = 'копировать'
+    b.onclick = () => {
+      navigator.clipboard.writeText(getValue())
+      b.textContent = '✓'
+      setTimeout(() => b.textContent = 'копировать', 1500)
+    }
+    return b
+  }
+
+  function buildItem(item, fields, mine, peerName) {
+    const box = document.createElement('div')
+    box.className = 'item' + (mine ? ' mine' : '')
+    const head = document.createElement('div'); head.className = 'item-head'
+    const who = document.createElement('span')
+    who.textContent = (mine ? 'Вы отправили' : 'От ' + (peerName || 'собеседника')) + ' · ' +
+                      new Date(item.created_at).toLocaleTimeString()
+    const del = document.createElement('button')
+    del.type = 'button'; del.className = 'mini'; del.textContent = 'удалить'
+    del.onclick = async () => { await roomApi('/items/' + item.id, { method: 'DELETE' }); pollRoomNow() }
+    head.append(who, del); box.append(head)
+
+    if (!fields) {
+      const bad = document.createElement('div'); bad.className = 'item-value'
+      bad.textContent = 'Не удалось расшифровать эту запись.'
+      box.append(bad); return box
+    }
+    for (const name of RC.FIELDS) {
+      if (!fields[name]) continue
+      const row = document.createElement('div'); row.className = 'item-row'
+      const label = document.createElement('span'); label.className = 'item-label'
+      label.textContent = FIELD_LABELS[name]
+      const value = document.createElement('span'); value.className = 'item-value'
+      const secret = name === 'password'
+      let hidden = secret
+      const paint = () => { value.textContent = hidden ? '••••••••' : fields[name] }
+      paint()
+      row.append(label, value)
+      if (secret) {
+        const eye = document.createElement('button')
+        eye.type = 'button'; eye.className = 'mini'; eye.textContent = 'показать'
+        eye.onclick = () => { hidden = !hidden; eye.textContent = hidden ? 'показать' : 'скрыть'; paint() }
+        row.append(eye)
+      }
+      row.append(copyButton(() => fields[name]))
+      box.append(row)
+    }
+    return box
+  }
+
+  async function renderRoom(state) {
+    if (!state.you.public_key) {
+      await roomApi('/key', { method: 'POST', body: JSON.stringify({ public_key: seat.publicB64 }) })
+    } else if (state.you.public_key !== seat.publicB64) {
+      setRoomNote('Для этой комнаты уже опубликован другой ключ. Откройте её на устройстве, где вы проходили верификацию.', 'expired')
+      return
+    }
+    if (!state.ready) {
+      document.getElementById('room-live').style.display = 'none'
+      setRoomNote(state.peer.verified ? '⏳ Собеседник готовит защищённый канал…'
+                                      : '⏳ Ждём, пока собеседник пройдёт верификацию…')
+      return
+    }
+
+    if (roomKeyPeer !== state.peer.public_key) {
+      roomKey = await RC.deriveRoomKey(seat.privateJwk, state.peer.public_key, CODE)
+      roomKeyPeer = state.peer.public_key
+      document.getElementById('room-safety').textContent =
+        await RC.safetyCode(state.you.public_key, state.peer.public_key, CODE)
+    }
+    setRoomNote('')
+    document.getElementById('room-live').style.display = 'block'
+
+    const list = document.getElementById('room-items')
+    const present = new Set(state.items.map(i => i.id))
+    for (const [id, node] of shown) {
+      if (!present.has(id)) { node.remove(); shown.delete(id) }
+    }
+    for (const item of state.items) {
+      if (shown.has(item.id)) continue
+      let fields = null
+      try { fields = await RC.decryptItem(roomKey, CODE, item.from, item) } catch (e) {}
+      const node = buildItem(item, fields, item.from === state.slot, state.peer.name)
+      shown.set(item.id, node)
+      list.prepend(node)
+    }
+  }
+
+  let roomTimer = null
+  async function pollRoom() {
+    clearTimeout(roomTimer)
+    if (roomClosed) return
+    try {
+      const { status, body } = await roomApi('', { method: 'GET' })
+      if (status === 410) { closeRoom(); return }
+      if (status === 401) {
+        setRoomNote('Нет доступа: откройте комнату на том устройстве, где вы проходили верификацию.', 'expired')
+      } else if (body && body.ok) {
+        await renderRoom(body)
+      }
+    } catch (e) { /* offline: try again */ }
+    roomTimer = setTimeout(pollRoom, 3000)
+  }
+  function pollRoomNow() { pollRoom() }
+
+  async function sendItem(event) {
+    event.preventDefault()
+    setRoomError('')
+    if (!roomKey) { setRoomError('Канал ещё не готов.'); return }
+    const input = {}
+    for (const name of RC.FIELDS) input[name] = document.getElementById('f-' + name).value
+    const button = document.getElementById('room-send')
+    button.disabled = true
+    try {
+      const sealed = await RC.encryptItem(roomKey, CODE, seat.slot, input)
+      const { body } = await roomApi('/items', { method: 'POST', body: JSON.stringify(sealed) })
+      if (body && body.ok) {
+        for (const name of RC.FIELDS) document.getElementById('f-' + name).value = ''
+        pollRoomNow()
+      } else {
+        setRoomError((body && body.reason) || 'Не удалось отправить.')
+      }
+    } catch (e) {
+      setRoomError(e.message === 'empty' ? 'Заполните хотя бы одно поле.' : 'Не удалось зашифровать.')
+    } finally { button.disabled = false }
+  }
+
+  async function startRoom() {
+    forgetStaleRooms()
+    seat = loadSeat()
+    document.getElementById('room').style.display = 'block'
+    if (!seat || !seat.token) {
+      setRoomNote('Обмен данными доступен на том устройстве, где вы проходили верификацию.', 'pending')
+      return
+    }
+    if (!RC || !window.crypto || !window.crypto.subtle) {
+      setRoomNote('Этому браузеру нужен HTTPS и современное шифрование для обмена данными.', 'expired')
+      return
+    }
+    if (!seat.privateJwk) {
+      const identity = await RC.generateIdentity()
+      seat.privateJwk = identity.privateJwk
+      seat.publicB64 = identity.publicB64
+      saveSeat()
+    }
+    document.getElementById('room-form').addEventListener('submit', sendItem)
+    document.getElementById('f-password-toggle').onclick = function () {
+      const field = document.getElementById('f-password')
+      field.type = field.type === 'password' ? 'text' : 'password'
+      this.textContent = field.type === 'password' ? 'показать' : 'скрыть'
+    }
+    pollRoom()
+  }
+  startRoom()
 
   poll()
 </script>

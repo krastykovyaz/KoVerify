@@ -133,6 +133,17 @@
     ))
   }
 
+  // The server hands this out once, to the browser that just passed
+  // verification. It is what later proves "I am side A/B" to the room.
+  function rememberSeat(data) {
+    if (!data.token) return
+    try {
+      localStorage.setItem('room:' + CODE, JSON.stringify({
+        slot: data.slot, token: data.token, savedAt: Date.now(),
+      }))
+    } catch (e) { /* private mode: the room just will not open on this device */ }
+  }
+
   function showAlert(msg, type) {
     const el = document.getElementById('alert')
     el.innerHTML = msg
@@ -157,6 +168,7 @@
       const data = await res.json()
 
       if (data.ok) {
+        rememberSeat(data)
         showAlert(`✅ Верифицированы как <strong>${esc(data.name)}</strong>`, 'success')
         setTimeout(() => location.href = `/result/${CODE}`, 1000)
       } else if (data.reason && data.reason.includes('не предоставлен')) {
@@ -203,6 +215,7 @@
       const data = await res.json()
 
       if (data.ok) {
+        rememberSeat(data)
         showAlert(`✅ Верифицированы как <strong>${esc(data.name)}</strong>`, 'success')
         setTimeout(() => location.href = `/result/${CODE}`, 1000)
       } else {
