@@ -29,6 +29,9 @@ PUBLIC_KEY_BYTES = 65                   # uncompressed P-256 point
 
 # A request nobody answers lapses, and a call that is never closed out does too,
 # so the room never shows a stale prompt.
+# A page polls every three seconds; four missed polls and the person is gone.
+PRESENCE_WINDOW = timedelta(seconds=12)
+
 VIDEO_REQUEST_TTL = timedelta(seconds=120)
 VIDEO_ACTIVE_TTL = timedelta(minutes=30)
 
@@ -100,14 +103,21 @@ def _authorize(code):
             slot = candidate
     if slot is None:
         return _fail("нет доступа к комнате", 401)
+    # Any authorised call shows this person is here. The other side sees it as
+    # presence; it is wiped with everything else when the room closes.
+    conn.execute(f"UPDATE sessions SET {slot}_seen_at=? WHERE code=?",
+                 (utcnow().isoformat(), code))
+    conn.commit()
     return conn, row, slot
 
 
 def _side(row, slot):
+    seen = parse_ts(row[f"{slot}_seen_at"])
     return {
         "name": row[f"{slot}_name"],
         "verified": bool(row[f"{slot}_verified"]),
         "public_key": row[f"{slot}_pub"] or None,
+        "online": bool(seen and utcnow() - seen <= PRESENCE_WINDOW),
     }
 
 

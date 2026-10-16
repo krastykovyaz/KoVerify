@@ -104,6 +104,16 @@
     .close-room { width: 100%; margin-top: 18px; padding: 10px; background: #fff; color: #991b1b;
                   border: 1.5px solid #fecaca; border-radius: 10px; font: inherit; font-size: .85rem;
                   font-weight: 600; cursor: pointer }
+    .toasts { position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+              width: min(92vw, 420px); z-index: 50; display: flex; flex-direction: column;
+              gap: 8px; pointer-events: none }
+    .toast { pointer-events: auto; background: #1e1b4b; color: #fff; padding: 10px 14px;
+             border-radius: 12px; font-size: .85rem; line-height: 1.4; cursor: pointer;
+             box-shadow: 0 6px 24px rgba(0,0,0,.25) }
+    .presence-row { display: flex; justify-content: space-between; align-items: center;
+                    gap: 8px; margin-bottom: 12px }
+    .presence { font-size: .8rem; color: #6b7280 }
+    .presence.on { color: #166534 }
     .room-error { color: #991b1b; font-size: .8rem; margin-top: 8px; min-height: 1em }
   </style>
 </head>
@@ -140,6 +150,10 @@
   <h1>Обмен данными</h1>
   <p class="sub">Видно только вам двоим. Шифруется в ваших браузерах: сервер хранит лишь
      нечитаемый шифртекст и удаляет его вместе с комнатой.</p>
+  <div class="presence-row">
+    <span class="presence" id="room-presence"></span>
+    <button type="button" class="mini" id="room-notify" style="display:none"></button>
+  </div>
   <div class="status-bar pending" id="room-note">⏳ Подготовка…</div>
 
   <div id="room-live" style="display:none">
@@ -180,6 +194,8 @@
     <button type="button" class="close-room" id="room-close">🗑 Закрыть комнату и удалить всё</button>
   </div>
 </div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script src="/static/room-crypto.js?v=1"></script>
 <script>
@@ -300,7 +316,7 @@
     return { status: res.status, body }
   }
 
-  function closeRoom(message) {
+  function closeRoom(message, byMe) {
     roomClosed = true
     try { localStorage.removeItem(SEAT_KEY) } catch (e) {}      // the private key goes with it
     seat = roomKey = null
@@ -311,13 +327,14 @@
     document.getElementById('room-countdown').textContent = ''
     wipeStatusCard('🔒 Комната закрыта: все данные удалены')
     setRoomNote((message || 'Комната закрыта') + ' То, что вы скопировали, осталось только у вас.', 'expired')
+    if (!byMe) notify('Комната закрыта: все данные удалены')
   }
 
   async function closeRoomNow() {
     if (!confirm('Закрыть комнату? Всё, что в ней есть, удалится у обоих, это нельзя отменить.')) return
     const { status, body } = await roomApi('/close', { method: 'POST' })
     if (status === 410 || (body && body.ok)) {
-      closeRoom('Вы закрыли комнату: всё удалено с сервера и из этого браузера.')
+      closeRoom('Вы закрыли комнату: всё удалено с сервера и из этого браузера.', true)
     } else {
       setRoomError((body && body.reason) || 'Не удалось закрыть комнату.')
     }
@@ -343,7 +360,10 @@
                       new Date(item.created_at).toLocaleTimeString()
     const del = document.createElement('button')
     del.type = 'button'; del.className = 'mini'; del.textContent = 'удалить'
-    del.onclick = async () => { await roomApi('/items/' + item.id, { method: 'DELETE' }); pollRoomNow() }
+    del.onclick = async () => {
+      deletedByMe.add(item.id)                  // your own deletion is not news to you
+      await roomApi('/items/' + item.id, { method: 'DELETE' }); pollRoomNow()
+    }
     head.append(who, del); box.append(head)
 
     if (!fields) {
@@ -381,6 +401,7 @@
       setRoomNote('Для этой комнаты уже опубликован другой ключ. Откройте её на устройстве, где вы проходили верификацию.', 'expired')
       return
     }
+    detectEvents(state)
     if (!state.ready) {
       document.getElementById('room-live').style.display = 'none'
       setRoomNote(state.peer.verified ? '⏳ Собеседник готовит защищённый канал…'
@@ -418,6 +439,158 @@
   }
 
 
+
+  // ── Уведомления об активности в комнате ───────────────────────────
+  // A page can only notice what happens while it is open. Every event gets a
+  // toast and, when the tab is in the background, an unread count in the title.
+  // If the person turns notifications on it also beeps, vibrates and, with the
+  // browser's permission, raises a system notification. Those say what kind of
+  // thing happened, never what was shared, and never name anyone: they appear on
+  // lock screens.
+  let unread = 0
+  const prev = { init: false, peerVerified: false, ready: false, online: false, videoKey: '', milestones: new Set() }
+  const deletedByMe = new Set()
+  const PREF_KEY = 'notify:on'
+
+  function notifyOn() { try { return localStorage.getItem(PREF_KEY) === '1' } catch (e) { return false } }
+  function setNotify(on) { try { localStorage.setItem(PREF_KEY, on ? '1' : '0') } catch (e) {} paintNotifyButton() }
+  function paintNotifyButton() {
+    const b = document.getElementById('room-notify')
+    b.textContent = notifyOn() ? '🔔 Уведомления: вкл' : '🔕 Уведомления: выкл'
+  }
+
+  function toast(text) {
+    const box = document.getElementById('toasts')
+    const node = document.createElement('div')
+    node.className = 'toast'; node.textContent = text
+    node.onclick = () => node.remove()
+    box.append(node)
+    while (box.children.length > 4) box.firstChild.remove()
+    // Not while nobody is looking: it would be gone before they came back.
+    if (!document.hidden) setTimeout(() => node.remove(), 7000)
+  }
+
+  function beep() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      if (!Ctx) return
+      const ctx = new Ctx(), osc = ctx.createOscillator(), gain = ctx.createGain()
+      osc.frequency.value = 880; gain.gain.value = 0.08
+      osc.connect(gain); gain.connect(ctx.destination)
+      osc.start(); osc.stop(ctx.currentTime + 0.18)
+      setTimeout(() => ctx.close && ctx.close(), 400)
+    } catch (e) {}
+  }
+
+  function systemNotification(text) {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+    try {
+      const n = new Notification('Верификатор', { body: text, tag: 'verifier-room', renotify: true })
+      n.onclick = () => { window.focus(); n.close() }
+    } catch (e) {}
+  }
+
+  // `text` may name the other person; the system notification never does.
+  function notify(text, options) {
+    options = options || {}
+    toast(text)
+    if (options.light) return                                   // presence: a toast is enough
+    const hidden = document.hidden
+    if (hidden) { unread++; refreshTitle() }
+    if (!notifyOn()) return
+    beep()
+    if (navigator.vibrate) navigator.vibrate([120, 60, 120])
+    if (hidden) systemNotification(options.plain || text)
+  }
+
+  async function toggleNotify() {
+    if (notifyOn()) { setNotify(false); toast('Уведомления выключены'); return }
+    setNotify(true)
+    if (typeof Notification === 'undefined') {
+      toast('Этот браузер не показывает уведомления за пределами страницы: будут звук и сигнал, пока страница открыта.')
+    } else {
+      if (Notification.permission === 'default') { try { await Notification.requestPermission() } catch (e) {} }
+      if (Notification.permission === 'denied') {
+        toast('Браузер запретил системные уведомления: останутся звук и значок на вкладке.')
+      } else {
+        toast('Уведомления включены.')
+      }
+    }
+    beep()
+  }
+
+  // Compare this poll with the last one and say what the other person did.
+  // Nothing here reacts to what you did yourself.
+  function detectEvents(state) {
+    const first = !prev.init
+    const peer = state.peer.name || 'Собеседник'
+    const who = (text) => ({ plain: text.split(peer).join('Собеседник') })
+    const say = (text, extra) => notify(text, Object.assign(who(text), extra || {}))
+
+    const presence = document.getElementById('room-presence')
+    presence.className = 'presence' + (state.peer.online ? ' on' : '')
+    presence.textContent = !state.peer.verified ? `○ ${peer} ещё не прошёл(а) верификацию`
+      : state.peer.online ? `● ${peer} в комнате` : `○ ${peer} сейчас не в комнате`
+
+    if (!first) {
+      if (state.peer.verified && !prev.peerVerified) say(`${peer} прошёл(а) верификацию`)
+      if (state.ready && !prev.ready) say('Защищённый канал готов: можно обмениваться данными')
+      if (state.peer.online && !prev.online) say(`${peer} вошёл(а) в комнату`, { light: true })
+    }
+
+    // Data sent to you. On the first look after a reload this is a catch-up, and
+    // the ids already seen are remembered so a reload does not repeat it.
+    const seen = new Set(seat.seen || [])
+    const fresh = state.items.filter(i => i.from !== state.slot && !seen.has(i.id))
+    if (fresh.length) {
+      const count = fresh.length > 1 ? ` (${fresh.length})` : ''
+      say(first ? `Пока вас не было, ${peer} отправил(а) вам данные${count}`
+                : `${peer} отправил(а) вам данные${count}`)
+    }
+    const before = seen.size
+    state.items.forEach(i => seen.add(i.id))
+    if (seen.size !== before) { seat.seen = [...seen].slice(-200); saveSeat() }
+
+    // Something you were looking at was deleted by the other person.
+    const present = new Set(state.items.map(i => i.id))
+    for (const id of shown.keys()) {
+      if (!present.has(id) && !deletedByMe.has(id)) say(`${peer} удалил(а) запись`)
+    }
+
+    // Video verification, from the other person's side only.
+    const v = state.video
+    const key = v ? `${v.state}|${v.by}|${v.at}` : ''
+    if (v && key !== prev.videoKey) {
+      const mineAsked = v.by === state.slot
+      if (v.state === 'requested' && !mineAsked) say(first ? `${peer} ждёт вашей видеопроверки` : `${peer} просит пройти видеопроверку`)
+      else if (!first && v.state === 'active' && mineAsked) say(`${peer} принял(а) запрос: откройте видеозвонок`)
+      else if (!first && v.state === 'declined' && mineAsked) say(`${peer} отклонил(а) запрос видеопроверки`)
+      else if (!first && v.state === 'confirmed' && !mineAsked) say(`${peer} подтвердил(а) вашу личность по видео`)
+      else if (!first && v.state === 'denied' && !mineAsked) say(`${peer} не подтвердил(а) вашу личность по видео`)
+    }
+
+    // The room is about to delete itself.
+    const minutes = (new Date(state.expires_at) - Date.now()) / 60000
+    for (const m of [5, 1]) {
+      if (minutes <= m && !prev.milestones.has(m)) {
+        prev.milestones.add(m)
+        if (!first) notify(m === 1 ? 'Комната закроется меньше чем через минуту: скопируйте нужное'
+                                   : 'Комната закроется меньше чем через 5 минут: скопируйте нужное')
+      }
+    }
+
+    Object.assign(prev, { init: true, peerVerified: state.peer.verified, ready: state.ready,
+                          online: state.peer.online, videoKey: key })
+  }
+
+  // Coming back to the tab: clear the count and look right away.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return
+    unread = 0; refreshTitle()
+    document.querySelectorAll('#toasts .toast').forEach(t => setTimeout(() => t.remove(), 7000))
+    if (seat && !roomClosed) pollRoomNow()
+  })
+
   // ── Видеопроверка ──────────────────────────────────────────────────
   // One person asks, the other accepts, they meet in a video call and the asker
   // records whether they are satisfied. The server only tracks the request; the
@@ -439,14 +612,17 @@
     return b
   }
 
+  function titleNow() { return (unread > 0 ? `(${unread}) ` : '') + BASE_TITLE }
+  function refreshTitle() { if (!titleFlash) document.title = titleNow() }
+
   function flashTitle(on) {
     if (on && !titleFlash) {
       let flip = false
       titleFlash = setInterval(() => {
-        document.title = (flip = !flip) ? '📹 Запрос видеопроверки' : BASE_TITLE
+        document.title = (flip = !flip) ? '📹 Запрос видеопроверки' : titleNow()
       }, 1000)
     } else if (!on && titleFlash) {
-      clearInterval(titleFlash); titleFlash = null; document.title = BASE_TITLE
+      clearInterval(titleFlash); titleFlash = null; document.title = titleNow()
     }
   }
 
@@ -573,6 +749,8 @@
     }
     document.getElementById('room-form').addEventListener('submit', sendItem)
     document.getElementById('room-close').onclick = closeRoomNow
+    const bell = document.getElementById('room-notify')
+    bell.style.display = 'inline-block'; bell.onclick = toggleNotify; paintNotifyButton()
     document.getElementById('f-password-toggle').onclick = function () {
       const field = document.getElementById('f-password')
       field.type = field.type === 'password' ? 'text' : 'password'

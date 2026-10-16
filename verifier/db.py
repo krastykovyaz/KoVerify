@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     video_state TEXT,
     video_by    TEXT,
     video_at    TEXT,
-    closed_at   TEXT
+    closed_at   TEXT,
+    a_seen_at   TEXT,
+    b_seen_at   TEXT
 );
 CREATE TABLE IF NOT EXISTS room_items (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +130,8 @@ _ADDED_COLUMNS = (
     ("sessions", "video_by", "TEXT"),
     ("sessions", "video_at", "TEXT"),
     ("sessions", "closed_at", "TEXT"),
+    ("sessions", "a_seen_at", "TEXT"),
+    ("sessions", "b_seen_at", "TEXT"),
 )
 
 
@@ -152,7 +156,8 @@ def init_db(path):
 _SCRUB = (
     "user_a=NULL, user_b=NULL, a_verified=0, b_verified=0, a_name=NULL, b_name=NULL, "
     "a_method=NULL, b_method=NULL, a_token_hash=NULL, b_token_hash=NULL, "
-    "a_pub=NULL, b_pub=NULL, video_state=NULL, video_by=NULL, video_at=NULL"
+    "a_pub=NULL, b_pub=NULL, video_state=NULL, video_by=NULL, video_at=NULL, "
+    "a_seen_at=NULL, b_seen_at=NULL"
 )
 
 

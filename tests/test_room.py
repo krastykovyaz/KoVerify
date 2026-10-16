@@ -512,7 +512,7 @@ def test_existing_databases_gain_the_video_columns(tmp_path):
 
 # ── closing a room deletes everything in it ────────────────────────────
 
-SCRUBBED = ("user_a", "user_b", "a_name", "b_name", "a_method", "b_method",
+SCRUBBED = ("user_a", "user_b", "a_name", "b_name", "a_method", "b_method", "a_seen_at", "b_seen_at",
             "a_token_hash", "b_token_hash", "a_pub", "b_pub",
             "video_state", "video_by", "video_at")
 
@@ -674,3 +674,60 @@ def test_existing_databases_gain_the_closed_column(tmp_path):
     conn.commit(); conn.close()
     init_db(str(path))
     assert "closed_at" in {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
+
+
+# ── presence, so each side can tell the other is actually here ─────────
+
+def age_seen(cfg, code, slot, seconds):
+    conn = db(cfg)
+    conn.execute(f"UPDATE sessions SET {slot}_seen_at=? WHERE code=?",
+                 ((utcnow() - timedelta(seconds=seconds)).isoformat(), code))
+    conn.commit()
+
+
+def test_a_person_is_online_once_they_have_polled_and_not_before(room):
+    assert room.call("alice", "get").get_json()["peer"]["online"] is False     # bob has not called yet
+    assert room.call("bob", "get").get_json()["peer"]["online"] is True        # alice just did
+    assert room.call("alice", "get").get_json()["peer"]["online"] is True      # and now bob has
+
+
+def test_presence_lapses_after_a_few_missed_polls(room, cfg):
+    room.call("alice", "get"); room.call("bob", "get")
+    age_seen(cfg, room.code, room.slot["bob"], 30)
+    assert room.call("alice", "get").get_json()["peer"]["online"] is False
+    age_seen(cfg, room.code, room.slot["bob"], 5)
+    assert room.call("alice", "get").get_json()["peer"]["online"] is True
+
+
+def test_any_authorised_call_counts_as_being_here(room):
+    room.publish("bob")
+    assert room.call("alice", "get").get_json()["peer"]["online"] is True
+
+
+def test_a_stranger_cannot_fake_presence(room, cfg):
+    room.call("alice", "get")
+    room.call("bob", "get", headers={"X-Room-Token": "x" * 43})
+    row = session_row(cfg, room.code)
+    assert row[f"{room.slot['bob']}_seen_at"] is None            # a wrong token leaves no trace
+    assert room.call("alice", "get").get_json()["peer"]["online"] is False
+
+
+def test_presence_is_wiped_when_the_room_closes(ready, cfg):
+    ready.call("alice", "get"); ready.call("bob", "get")
+    assert session_row(cfg, ready.code)["a_seen_at"] and session_row(cfg, ready.code)["b_seen_at"]
+    ready.call("alice", "post", "/close")
+    row = session_row(cfg, ready.code)
+    assert row["a_seen_at"] is None and row["b_seen_at"] is None
+
+
+def test_existing_databases_gain_the_presence_columns(tmp_path):
+    from verifier.db import init_db
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, "
+                 "b_name TEXT, a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.commit(); conn.close()
+    init_db(str(path))
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
+    assert {"a_seen_at", "b_seen_at"} <= cols

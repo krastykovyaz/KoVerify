@@ -109,7 +109,43 @@ and each of them can read, copy or delete what is there.
 - **Tests.** `tests/test_room.py` covers access and limits.
   `tests/test_room_e2e.py` runs two simulated browsers through the real client
   crypto against a live server, including tampering, cross-room replay and a
-  swapped key. It needs Node.js and is skipped without it.
+  swapped key. `tests/test_room_ui.py` drives the real pages (sharing, video,
+  closing, notifications, login) in a DOM with stubbed notifications, sound and
+  tab visibility. Both need Node.js 24 or later and are skipped without it; the
+  page tests also need `cd tests/js && npm install` once for jsdom.
+
+## Activity notifications
+
+The room tells each person what the other one does, so nobody has to keep
+looking at the screen. Only the other person's actions notify you, never your
+own.
+
+| Event | Who is told |
+|---|---|
+| the other person verified, or the secure channel became ready | the one waiting |
+| the other person entered the room | the one already there (toast only) |
+| data was sent to you, or a record you were looking at was deleted | the receiver |
+| a video request, its acceptance or refusal, and the verdict | the other person |
+| five minutes and one minute before the room deletes itself | both |
+| the room was closed or ran out of time | whoever did not close it |
+
+- **On the page.** Every event is a toast, and a background tab shows an unread
+  count in its title. The header shows whether the other person is in the room
+  right now (they count as gone after four missed polls, 12 seconds).
+- **Optional alerts.** "🔔 Уведомления" adds a beep, vibration and, if the
+  browser allows, a system notification while the tab is in the background. It
+  is off until chosen and remembered per browser.
+- **Nothing sensitive in an alert.** System notifications say what kind of thing
+  happened, never what was shared, and they never name the other person because
+  they appear on lock screens. The toast, on the open page, does use the name.
+- **Catching up.** Returning to a tab polls at once. After a reload the page
+  says what arrived while you were away, once; the ids already seen are kept so
+  reloading again does not repeat it.
+- **The limit.** A page can only notice things while it is open. A tab that is
+  closed, or that the phone has suspended in the background, polls nothing and
+  alerts nothing until it is opened again. Reaching a closed tab needs Web Push:
+  push keys, a service worker, and the browsers' push services, which also
+  need an installed app on iPhone. That is a separate piece of work.
 
 ## Video verification
 
