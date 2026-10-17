@@ -359,3 +359,40 @@ def test_no_page_relies_on_the_global_event_object():
     for path in ("templates/admin.html", "templates/download.html",
                  "templates/verify.html", "templates/index.html", "templates/result.html"):
         assert "event.target" not in open(path).read(), path
+
+
+def test_concurrent_workers_can_all_run_the_migration(tmp_path):
+    """At the 2026-10-16 deploy two of three workers died adding the same column."""
+    import multiprocessing as mp
+    import sqlite3
+    from verifier.db import init_db
+
+    path = tmp_path / "db.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, totp_secret TEXT, "
+                 "cert_pem TEXT, serial TEXT, p12_b64 TEXT, revoked INTEGER DEFAULT 0, created_at TEXT)")
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, b_name TEXT, "
+                 "a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.commit(); conn.close()
+
+    def worker(p, barrier, results):
+        barrier.wait()
+        try:
+            init_db(p); results.put("ok")
+        except Exception as exc:                      # pragma: no cover - the failure we test for
+            results.put(repr(exc))
+
+    ctx = mp.get_context("fork")
+    for _ in range(12):
+        barrier, results = ctx.Barrier(3), ctx.Queue()
+        procs = [ctx.Process(target=worker, args=(str(path), barrier, results)) for _ in range(3)]
+        for p in procs: p.start()
+        for p in procs: p.join(30)
+        outcomes = [results.get(timeout=5) for _ in procs]
+        assert outcomes == ["ok"] * 3, outcomes
+        # Put the database back to the old shape so the race is run again.
+        conn = sqlite3.connect(path)
+        for table, col in (("sessions", "a_seen_at"), ("sessions", "b_seen_at"), ("sessions", "closed_at")):
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+        conn.commit(); conn.close()

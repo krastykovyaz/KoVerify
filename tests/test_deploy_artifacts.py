@@ -108,3 +108,10 @@ def test_the_purge_job_is_sandboxed_and_runs_often():
     assert "-m verifier.purge" in service and "ReadOnlyPaths=/var/www/verifier/verifier" in service
     assert "OnCalendar=*:0/5" in open("deploy/verifier-purge.timer").read()
     assert "verifier-purge.timer" in DEPLOY
+
+
+def test_deploy_fails_when_workers_needed_a_restart_to_boot():
+    """The 2026-10-16 deploy reported success while two workers had crashed."""
+    assert "NRestarts" in DEPLOY
+    block = DEPLOY[DEPLOY.index("NRestarts"):DEPLOY.index('log "health check passed"')]
+    assert "rollback" in block and "die" in block

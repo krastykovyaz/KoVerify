@@ -270,6 +270,13 @@ if [ "$DRY_RUN" = 0 ]; then
     rollback
     die "deploy failed and was rolled back"
   fi
+  restarts="$(systemctl show "$SERVICE" -p NRestarts --value 2>/dev/null || echo 0)"
+  if [ "${restarts:-0}" != 0 ]; then
+    warn "the service answered, but only after systemd restarted it $restarts time(s) during boot"
+    journalctl -u "$SERVICE" -n 40 --no-pager || true
+    rollback
+    die "deploy failed: workers crashed at boot (see the log above) and was rolled back"
+  fi
   log "health check passed"
   run systemctl reload nginx
 fi

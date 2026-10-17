@@ -132,18 +132,33 @@ _ADDED_COLUMNS = (
     ("sessions", "closed_at", "TEXT"),
     ("sessions", "a_seen_at", "TEXT"),
     ("sessions", "b_seen_at", "TEXT"),
+    ("sessions", "a_commit", "TEXT"),
+    ("sessions", "b_commit", "TEXT"),
 )
 
 
 def init_db(path):
-    """Create tables if absent. Additive only, safe against a populated database."""
+    """Create tables if absent. Additive only, safe against a populated database.
+
+    Several gunicorn workers run this at the same moment. The write lock makes
+    the first one do the work while the rest wait (busy_timeout), and each
+    re-reads the columns once it holds the lock. Should two still collide, a
+    "duplicate column" is the other worker having finished first, not an error:
+    at the 2026-10-16 deploy that exact collision killed two of three workers.
+    """
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
         for table, column, decl in _ADDED_COLUMNS:
             have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-            if column not in have:
+            if column in have:
+                continue
+            try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
         conn.commit()
     finally:
         conn.close()
