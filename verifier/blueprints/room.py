@@ -6,11 +6,21 @@ a database leak, a backup or a log line reveals nothing readable. The server
 still decides who may publish a key and who may read the room, so access is
 tied to the token handed out when a slot is claimed, not to knowing the code.
 
-What the server can still do is substitute a public key. That is why the page
-shows both sides a short code derived from the two keys, to be compared aloud.
+What the server can still do is substitute a public key. Two things stop it.
+First, keys are committed before they are revealed: each side publishes the
+SHA-256 of its public key, and may reveal the key only once both commitments
+exist and the key matches its own commitment. The page pins the other side's
+commitment the first time it sees it, so a server that wants to show Alice a
+fake key for Bob has to choose that fake key before it has seen Alice's real
+one. Second, both screens show a ten-digit code derived from the two keys, to
+be compared aloud. Without the commitment that code was worth little: a server
+choosing both fake keys could find a matching pair by birthday search in
+seconds. With it, the server gets one blind guess in ten billion.
 """
 import base64
 import binascii
+import hashlib
+import re
 from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -26,6 +36,12 @@ MAX_CIPHERTEXT_BYTES = 12 * 1024        # a handful of short fields, never files
 IV_BYTES = 12                           # AES-GCM
 GCM_TAG_BYTES = 16
 PUBLIC_KEY_BYTES = 65                   # uncompressed P-256 point
+COMMIT_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def commitment_of(public_key_b64):
+    """What a side must have published before revealing this key."""
+    return hashlib.sha256(public_key_b64.encode()).hexdigest()
 
 # A request nobody answers lapses, and a call that is never closed out does too,
 # so the room never shows a stale prompt.
@@ -117,6 +133,7 @@ def _side(row, slot):
         "name": row[f"{slot}_name"],
         "verified": bool(row[f"{slot}_verified"]),
         "public_key": row[f"{slot}_pub"] or None,
+        "commit": row[f"{slot}_commit"] or None,
         "online": bool(seen and utcnow() - seen <= PRESENCE_WINDOW),
     }
 
@@ -164,15 +181,44 @@ def room_state(code):
     })
 
 
-@bp.route("/key", methods=["POST"])
-def publish_key(code):
+@bp.route("/commit", methods=["POST"])
+def publish_commitment(code):
+    """Step one of the key exchange: promise a key without showing it."""
     auth = _authorize(code)
     if not isinstance(auth, tuple) or len(auth) != 3:
         return auth
     conn, row, slot = auth
+    commit = (request.get_json(silent=True) or {}).get("commit")
+    if not isinstance(commit, str) or not COMMIT_RE.match(commit):
+        return _fail("некорректное обязательство", 400)
+    cursor = conn.execute(
+        f"UPDATE sessions SET {slot}_commit=? WHERE code=? "
+        f"AND ({slot}_commit IS NULL OR {slot}_commit='')",
+        (commit, code),
+    )
+    conn.commit()
+    if cursor.rowcount == 1 or row[f"{slot}_commit"] == commit:
+        return jsonify({"ok": True})
+    return _fail("обязательство уже опубликовано и не может быть заменено", 409)
+
+
+@bp.route("/key", methods=["POST"])
+def publish_key(code):
+    """Step two: reveal the key, only after both sides have committed."""
+    auth = _authorize(code)
+    if not isinstance(auth, tuple) or len(auth) != 3:
+        return auth
+    conn, row, slot = auth
+    other = "b" if slot == "a" else "a"
     public_key = (request.get_json(silent=True) or {}).get("public_key")
     if not _valid_public_key(public_key):
         return _fail("некорректный открытый ключ", 400)
+    if not row[f"{slot}_commit"]:
+        return _fail("сначала опубликуйте обязательство", 409)
+    if not row[f"{other}_commit"]:
+        return _fail("собеседник ещё не опубликовал обязательство", 409)
+    if commitment_of(public_key) != row[f"{slot}_commit"]:
+        return _fail("ключ не соответствует опубликованному обязательству", 409)
 
     # Set once. Replacing a key would make everything already sent unreadable and
     # would let a stolen token swap in a key of the thief's choosing.

@@ -394,15 +394,58 @@
     return box
   }
 
-  async function renderRoom(state) {
+  function tampered(reason) {
+    roomClosed = true
+    clearTimeout(roomTimer)
+    document.getElementById('room-live').style.display = 'none'
+    setRoomNote('⛔ ' + reason + ' Ничего не отправляйте и закройте комнату: кто-то вмешался в обмен ключами.', 'expired')
+  }
+
+  // Key exchange, in the order that makes the safety code trustworthy:
+  // commit, see the other side's commitment and pin it, reveal, verify.
+  // Returns false while the exchange is still in progress or has failed.
+  async function exchangeKeys(state) {
+    if (state.you.public_key && state.you.public_key !== seat.publicB64) {
+      setRoomNote('Для этой комнаты уже опубликован другой ключ. Откройте её на устройстве, где вы проходили верификацию.', 'expired')
+      return false
+    }
+    if (!seat.commit) {
+      // A seat made before commitments existed. If its key is already out there
+      // is nothing to commit to; otherwise commit to the key it already holds.
+      if (state.you.public_key) return true
+      seat.commit = await RC.commitment(seat.publicB64)
+      saveSeat()
+    }
+    if (!state.you.commit) {
+      await roomApi('/commit', { method: 'POST', body: JSON.stringify({ commit: seat.commit }) })
+      return false
+    }
+    if (!state.peer.commit) return false
+    if (!seat.peerCommit) { seat.peerCommit = state.peer.commit; saveSeat() }
+    else if (seat.peerCommit !== state.peer.commit) {
+      tampered('Обязательство собеседника изменилось после того, как вы его увидели.')
+      return false
+    }
     if (!state.you.public_key) {
       await roomApi('/key', { method: 'POST', body: JSON.stringify({ public_key: seat.publicB64 }) })
-    } else if (state.you.public_key !== seat.publicB64) {
-      setRoomNote('Для этой комнаты уже опубликован другой ключ. Откройте её на устройстве, где вы проходили верификацию.', 'expired')
+      return false
+    }
+    if (state.peer.public_key && !(await RC.keyMatchesCommitment(state.peer.public_key, seat.peerCommit))) {
+      tampered('Ключ собеседника не совпадает с его обязательством.')
+      return false
+    }
+    return true
+  }
+
+  async function renderRoom(state) {
+    const exchanged = await exchangeKeys(state)
+    if (roomClosed) return
+    if (!exchanged && !state.you.public_key) {
+      setRoomNote('⏳ Обмен ключами…')
       return
     }
     detectEvents(state)
-    if (!state.ready) {
+    if (!state.ready || !exchanged) {
       document.getElementById('room-live').style.display = 'none'
       setRoomNote(state.peer.verified ? '⏳ Собеседник готовит защищённый канал…'
                                       : '⏳ Ждём, пока собеседник пройдёт верификацию…')
@@ -745,6 +788,7 @@
       const identity = await RC.generateIdentity()
       seat.privateJwk = identity.privateJwk
       seat.publicB64 = identity.publicB64
+      seat.commit = identity.commit
       saveSeat()
     }
     document.getElementById('room-form').addEventListener('submit', sendItem)

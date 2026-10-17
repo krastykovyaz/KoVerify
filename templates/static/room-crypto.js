@@ -40,10 +40,26 @@
 
   async function generateIdentity() {
     const pair = await crypto.subtle.generateKey(CURVE, true, ['deriveBits'])
+    const publicB64 = toB64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)))
     return {
       privateJwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
-      publicB64: toB64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))),
+      publicB64,
+      commit: await commitment(publicB64),
     }
+  }
+
+  // Keys are committed before they are revealed. A side publishes this hash
+  // first and may show the key only after both hashes exist; the other side pins
+  // the hash it saw first and checks the revealed key against it. That is what
+  // makes the safety code mean something: without it a server choosing both
+  // fake keys could match the ten digits by birthday search in seconds.
+  async function commitment(publicB64) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(publicB64)))
+    return Array.from(digest, b => b.toString(16).padStart(2, '0')).join('')
+  }
+
+  async function keyMatchesCommitment(publicB64, commitHex) {
+    return typeof commitHex === 'string' && (await commitment(publicB64)) === commitHex
   }
 
   async function deriveRoomKey(privateJwk, peerPublicB64, code) {
@@ -120,5 +136,5 @@
     return `${digits.slice(0, 5)} ${digits.slice(5)}`
   }
 
-  return { FIELDS, generateIdentity, deriveRoomKey, encryptItem, decryptItem, safetyCode, videoRoomName, toB64, fromB64 }
+  return { FIELDS, generateIdentity, commitment, keyMatchesCommitment, deriveRoomKey, encryptItem, decryptItem, safetyCode, videoRoomName, toB64, fromB64 }
 })

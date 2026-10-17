@@ -90,9 +90,18 @@ and each of them can read, copy or delete what is there.
   another room or made to look like it came from the other person. The server
   stores ciphertext only: a database leak, a backup or a log reveals nothing.
   The code is in `templates/static/room-crypto.js`.
-- **Safety code.** The server could in principle swap a public key, so both
-  screens show ten digits derived from both keys. Read them to each other
-  aloud; if they differ, send nothing.
+- **Keys are committed before they are revealed.** Each browser first
+  publishes the SHA-256 of its public key; a key is accepted only after both
+  commitments exist and only if it matches its own commitment, and the page
+  pins the other side's commitment the first time it sees it and checks the
+  revealed key against it. Without this the safety code below was worth
+  little: a malicious server choosing both fake keys could find a matching
+  pair by birthday search (the audit did it in two seconds). With it, such a
+  server gets one blind guess in ten billion.
+- **Safety code.** Both screens show ten digits derived from both keys. Read
+  them to each other aloud; if they differ, send nothing. If the page itself
+  detects a key that does not match its commitment, it refuses to continue
+  and says so.
 - **Closing deletes everything.** Either person can press "Закрыть комнату и
   удалить всё", and a room also closes by itself when `SESSION_TTL_MINUTES`
   (30 by default) runs out; the page counts down. Either way the same routine

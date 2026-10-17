@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     b_token_hash TEXT,
     a_pub       TEXT,
     b_pub       TEXT,
+    a_commit    TEXT,
+    b_commit    TEXT,
     video_state TEXT,
     video_by    TEXT,
     video_at    TEXT,
@@ -171,7 +173,8 @@ def init_db(path):
 _SCRUB = (
     "user_a=NULL, user_b=NULL, a_verified=0, b_verified=0, a_name=NULL, b_name=NULL, "
     "a_method=NULL, b_method=NULL, a_token_hash=NULL, b_token_hash=NULL, "
-    "a_pub=NULL, b_pub=NULL, video_state=NULL, video_by=NULL, video_at=NULL, "
+    "a_pub=NULL, b_pub=NULL, a_commit=NULL, b_commit=NULL, "
+    "video_state=NULL, video_by=NULL, video_at=NULL, "
     "a_seen_at=NULL, b_seen_at=NULL"
 )
 

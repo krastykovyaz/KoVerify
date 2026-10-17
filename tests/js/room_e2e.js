@@ -50,17 +50,28 @@ const rejects = async (promise) => { try { await promise; return false } catch (
   ok('both people verified and got a seat token', seats.every(s => s.token && s.slot))
   const [A, B] = seats
 
+  for (const seat of seats) Object.assign(seat, await RC.generateIdentity())
+  const early = await api('POST', `/api/session/${code}/room/key`, seats[0].token, { public_key: seats[0].publicB64 })
+  ok('a key is refused before the commitments exist', early.status === 409)
   for (const seat of seats) {
-    const identity = await RC.generateIdentity()
-    Object.assign(seat, identity)
+    const r = await api('POST', `/api/session/${code}/room/commit`, seat.token, { commit: seat.commit })
+    ok(`${seat.id} committed to a key`, r.status === 200)
+  }
+  const liar = await RC.generateIdentity()
+  const mismatch = await api('POST', `/api/session/${code}/room/key`, seats[0].token, { public_key: liar.publicB64 })
+  ok('a key that does not match its commitment is refused', mismatch.status === 409)
+  for (const seat of seats) {
     const r = await api('POST', `/api/session/${code}/room/key`, seat.token, { public_key: seat.publicB64 })
-    ok(`${seat.id} published a public key`, r.status === 200)
+    ok(`${seat.id} revealed the committed key`, r.status === 200)
   }
 
   const stateA = (await api('GET', `/api/session/${code}/room`, A.token)).json
   const stateB = (await api('GET', `/api/session/${code}/room`, B.token)).json
   ok('room is ready for both', stateA.ready && stateB.ready)
   ok('each side sees the other\'s key', stateA.peer.public_key === B.publicB64 && stateB.peer.public_key === A.publicB64)
+  ok('each side can check the revealed key against the pinned commitment',
+     await RC.keyMatchesCommitment(stateA.peer.public_key, stateA.peer.commit) && await RC.keyMatchesCommitment(stateB.peer.public_key, stateB.peer.commit))
+  ok('a key the server swapped in would fail that check', !(await RC.keyMatchesCommitment(liar.publicB64, stateA.peer.commit)))
 
   const safetyA = await RC.safetyCode(stateA.you.public_key, stateA.peer.public_key, code)
   const safetyB = await RC.safetyCode(stateB.you.public_key, stateB.peer.public_key, code)

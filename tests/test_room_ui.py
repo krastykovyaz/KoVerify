@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
     reason="needs node and jsdom (cd tests/js && npm install)",
 )
 
-SCENARIOS = ["ui_verify.js", "ui_sharing.js", "ui_video.js", "ui_close.js", "ui_notify.js"]
+SCENARIOS = ["ui_verify.js", "ui_sharing.js", "ui_video.js", "ui_close.js", "ui_notify.js", "ui_tamper.js"]
 
 
 @pytest.fixture

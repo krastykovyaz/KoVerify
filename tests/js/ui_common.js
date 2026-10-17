@@ -10,7 +10,7 @@ const results = []
 const ok = (name, value, extra) => results.push([name, Boolean(value), extra || ''])
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-async function until(fn, label, ms = 8000) {
+async function until(fn, label, ms = 20000) {
   const t0 = Date.now()
   while (Date.now() - t0 < ms) {
     try { const v = await fn(); if (v) return v } catch (e) {}

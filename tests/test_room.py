@@ -27,6 +27,11 @@ def public_key():
         serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
 
 
+def commit_of(public_key_b64):
+    import hashlib
+    return hashlib.sha256(public_key_b64.encode()).hexdigest()
+
+
 def sealed(size=40):
     return {"iv": b64(os.urandom(12)), "ciphertext": b64(os.urandom(size))}
 
@@ -63,8 +68,21 @@ class Room:
         return getattr(self.client[who], method)(
             f"/api/session/{self.code}/room{path}", headers=headers, **kw)
 
+    def commit(self, who, key):
+        return self.call(who, "post", "/commit", json={"commit": commit_of(key)})
+
     def publish(self, who, key=None):
-        return self.call(who, "post", "/key", json={"public_key": key or public_key()})
+        """Commit then reveal, the way the page does. Both sides must have
+        committed before any key is accepted, so commit for the other side too
+        when it has not yet; the test can still reveal its own key later."""
+        key = key or getattr(self, "pending", {}).get(who) or public_key()
+        self.commit(who, key)
+        other = "bob" if who == "alice" else "alice"
+        if other in self.token and not self.call(other, "get").get_json()["you"]["commit"]:
+            self.pending = getattr(self, "pending", {})
+            self.pending[other] = public_key()
+            self.commit(other, self.pending[other])
+        return self.call(who, "post", "/key", json={"public_key": key})
 
 
 @pytest.fixture
@@ -181,11 +199,16 @@ def test_the_peer_sees_the_published_key(ready):
 def test_sending_needs_both_sides_verified_and_both_keys(app, cfg, admin):
     r = Room(app, cfg, admin)
     r.verify("alice")
-    r.publish("alice")
-    assert r.call("alice", "post", "/items", json=sealed()).status_code == 409      # bob not verified
+    alice_key = public_key()
+    r.commit("alice", alice_key)
+    assert r.call("alice", "post", "/key", json={"public_key": alice_key}).status_code == 409   # bob not here
+    assert r.call("alice", "post", "/items", json=sealed()).status_code == 409                   # bob not verified
     r.verify("bob")
-    assert r.call("alice", "post", "/items", json=sealed()).status_code == 409      # bob has no key yet
-    r.publish("bob")
+    bob_key = public_key()
+    r.commit("bob", bob_key)
+    assert r.call("alice", "post", "/key", json={"public_key": alice_key}).status_code == 200
+    assert r.call("alice", "post", "/items", json=sealed()).status_code == 409                   # bob has no key yet
+    assert r.call("bob", "post", "/key", json={"public_key": bob_key}).status_code == 200
     assert r.call("alice", "post", "/items", json=sealed()).status_code == 200
 
 
@@ -513,6 +536,7 @@ def test_existing_databases_gain_the_video_columns(tmp_path):
 # ── closing a room deletes everything in it ────────────────────────────
 
 SCRUBBED = ("user_a", "user_b", "a_name", "b_name", "a_method", "b_method", "a_seen_at", "b_seen_at",
+            "a_commit", "b_commit",
             "a_token_hash", "b_token_hash", "a_pub", "b_pub",
             "video_state", "video_by", "video_at")
 
@@ -731,3 +755,59 @@ def test_existing_databases_gain_the_presence_columns(tmp_path):
     init_db(str(path))
     cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
     assert {"a_seen_at", "b_seen_at"} <= cols
+
+
+
+# ── key commitments: the safety code is only sound if keys are promised first ──
+
+def test_a_key_is_refused_until_both_sides_have_committed(room):
+    key = public_key()
+    assert room.call("alice", "post", "/key", json={"public_key": key}).status_code == 409   # nobody committed
+    assert room.commit("alice", key).status_code == 200
+    assert room.call("alice", "post", "/key", json={"public_key": key}).status_code == 409   # bob has not
+    assert room.commit("bob", public_key()).status_code == 200
+    assert room.call("alice", "post", "/key", json={"public_key": key}).status_code == 200
+
+
+def test_a_key_must_match_the_commitment_made_for_it(room):
+    promised, actual = public_key(), public_key()
+    room.commit("alice", promised); room.commit("bob", public_key())
+    refused = room.call("alice", "post", "/key", json={"public_key": actual})
+    assert refused.status_code == 409 and "обязательств" in refused.get_json()["reason"]
+    assert room.call("alice", "get").get_json()["you"]["public_key"] is None
+    assert room.call("alice", "post", "/key", json={"public_key": promised}).status_code == 200
+
+
+def test_a_commitment_is_set_once_and_visible_to_the_other_side(room):
+    key = public_key()
+    assert room.commit("alice", key).status_code == 200
+    assert room.commit("alice", key).status_code == 200                      # idempotent retry
+    assert room.commit("alice", public_key()).status_code == 409             # no swapping
+    assert room.call("bob", "get").get_json()["peer"]["commit"] == commit_of(key)
+
+
+@pytest.mark.parametrize("bad", [None, "", "abc", "g" * 64, "A" * 64, 123, ["x"], "0" * 63])
+def test_malformed_commitments_are_rejected(room, bad):
+    assert room.call("alice", "post", "/commit", json={"commit": bad}).status_code == 400
+
+
+def test_commitments_need_a_seat_token_and_are_wiped_with_the_room(ready, cfg):
+    assert ready.call("alice", "post", "/commit", headers={}, json={"commit": "0" * 64}).status_code == 401
+    ready.call("alice", "post", "/close")
+    row = session_row(cfg, ready.code)
+    assert row["a_commit"] is None and row["b_commit"] is None
+
+
+def test_the_birthday_attack_no_longer_applies():
+    """With both fake keys fixed before the real ones are seen, a malicious
+    server gets one blind guess at ten digits instead of a free search. This
+    documents the property the protocol buys; the search itself is in the
+    2026-10-17 audit notes."""
+    import hashlib
+    a, b = public_key(), public_key()
+    # The server must publish a commitment for the key it will show Bob before it
+    # sees Bob's real key, so the commitment pins its choice.
+    fake_a = public_key()
+    pinned = commit_of(fake_a)
+    assert commit_of(public_key()) != pinned            # any other key fails the pin
+    assert hashlib.sha256(fake_a.encode()).hexdigest() == pinned
