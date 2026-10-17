@@ -27,9 +27,10 @@ function base32(text) {
   for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2))
   return Buffer.from(out)
 }
-function totp(secret) {
+// A code works once per person, so a second room in the same test uses the next step.
+function totp(secret, step = 0) {
   const counter = Buffer.alloc(8)
-  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)))
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000) + step))
   const mac = crypto.createHmac('sha1', base32(secret)).update(counter).digest()
   const o = mac[19] & 0xf
   const n = ((mac[o] & 0x7f) << 24) | (mac[o + 1] << 16) | (mac[o + 2] << 8) | mac[o + 3]
@@ -46,18 +47,20 @@ async function api(method, path, body) {
 
 // Verify every user over the API and return their seats, as the browser would
 // have stored them after logging in.
-async function seatsFor(code) {
+async function seatsFor(code, step = 0) {
   const seats = []
   for (const u of USERS) {
-    const r = await api('POST', `/api/session/${code}/verify/totp`, { user_id: u.id, code: totp(u.secret) })
+    const r = await api('POST', `/api/session/${code}/verify/totp`, { user_id: u.id, code: totp(u.secret, step) })
     seats.push({ slot: r.slot, token: r.token, savedAt: Date.now() })
   }
   return seats
 }
 
-async function openBrowser(path, seat, rawSeat) {
+async function openBrowser(path, seat, rawSeat, opts = {}) {
   const errors = []
-  const t = { notes: [], beeps: 0, vibes: 0, hidden: false, clip: null }
+  const t = { notes: [], beeps: 0, vibes: 0, hidden: false, clip: null, urls: [], camera: { opens: 0, stops: 0, denied: false },
+              recordings: [], noCamera: !!opts.noCamera }
+  t.camera.denied = !!opts.denied
   const dom = await JSDOM.fromURL(BASE + path, {
     runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
     beforeParse(window) {
@@ -74,6 +77,32 @@ async function openBrowser(path, seat, rawSeat) {
       window.Notification = function (title, opts) { t.notes.push({ title, body: opts && opts.body }); this.close = () => {} }
       window.Notification.permission = 'default'
       window.Notification.requestPermission = async () => { window.Notification.permission = 'granted'; return 'granted' }
+      // A fake camera: getUserMedia hands out a stream whose tracks count their stops.
+      // A fake recorder: the bytes of every recording are remembered so a test can
+      // check exactly what was uploaded, decrypted and played back.
+      let recId = 0
+      if (!t.noCamera) {
+        window.navigator.mediaDevices = { getUserMedia: async () => {
+          if (t.camera.denied) throw new Error('NotAllowedError')
+          t.camera.opens++
+          return { getTracks: () => [{ stop() { t.camera.stops++ } }] }
+        } }
+        window.MediaRecorder = class {
+          static isTypeSupported(m) { return m === 'video/webm' }
+          constructor(stream, opts) { this.state = 'inactive'; this.mimeType = 'video/webm'; this.id = ++recId }
+          start() { this.state = 'recording' }
+          stop() {
+            this.state = 'inactive'
+            const bytes = Buffer.concat([Buffer.from('FAKE-WEBM-RECORDING-' + this.id + '-'), crypto.randomBytes(3000)])
+            t.recordings.push(bytes)
+            this.ondataavailable && this.ondataavailable({ data: new window.Blob([bytes], { type: 'video/webm' }) })
+            this.onstop && this.onstop()
+          }
+        }
+      }
+      window.URL.createObjectURL = (blob) => { t.urls.push(blob); return 'blob:fake-' + t.urls.length }
+      window.URL.revokeObjectURL = () => {}
+      window.HTMLMediaElement.prototype.play = () => Promise.resolve()
       Object.defineProperty(window.document, 'hidden', { get: () => t.hidden, configurable: true })
       window.addEventListener('error', e => errors.push(String(e.message)))
       const key = 'room:' + path.split('/').pop()

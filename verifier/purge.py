@@ -14,7 +14,7 @@ def main():
     cfg = Config()
     conn = connect(cfg.db_path)
     try:
-        purge_expired(conn, cfg.nonce_ttl_seconds)
+        purge_expired(conn, cfg.nonce_ttl_seconds, cfg.proofs_dir)
         conn.commit()
         rooms = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         items = conn.execute("SELECT COUNT(*) FROM room_items").fetchone()[0]

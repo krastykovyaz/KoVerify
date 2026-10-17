@@ -57,7 +57,7 @@ def _gone(conn, row):
     never depends on the cleanup job having run.
     """
     if _session_expired(row):
-        close_room(conn, row["code"])
+        close_room(conn, row["code"], _cfg().proofs_dir)
         conn.commit()
         return jsonify({"ok": False, "reason": "сессия истекла"})
     if row["closed_at"]:
@@ -125,7 +125,7 @@ def create_session():
         return _too_many(retry)
 
     conn = get_db()
-    purge_expired(conn, cfg.nonce_ttl_seconds)
+    purge_expired(conn, cfg.nonce_ttl_seconds, cfg.proofs_dir)
     now = utcnow()
     expires = now + dt.timedelta(minutes=cfg.session_ttl_minutes)
     for _ in range(5):
@@ -160,7 +160,7 @@ def session_status(code):
         return jsonify({"error": "не найдено"}), 404
     conn = get_db()
     if _session_expired(row):
-        close_room(conn, code)
+        close_room(conn, code, cfg.proofs_dir)
         conn.commit()
         return jsonify({"status": "expired"})
     if row["closed_at"]:
@@ -183,7 +183,7 @@ def get_nonce():
         return _too_many(retry)
 
     conn = get_db()
-    purge_expired(conn, cfg.nonce_ttl_seconds)
+    purge_expired(conn, cfg.nonce_ttl_seconds, cfg.proofs_dir)
     nonce = secrets.token_hex(32)
     conn.execute(
         "INSERT INTO nonces VALUES (?,?)", (nonce, utcnow().isoformat())

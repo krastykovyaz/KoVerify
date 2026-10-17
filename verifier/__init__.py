@@ -48,6 +48,7 @@ def create_app(config=None, testing=False):
     )
 
     init_db(cfg.db_path)
+    os.makedirs(cfg.proofs_dir, mode=0o700, exist_ok=True)
     if ca_exists(cfg):
         verify_ca(cfg)
     app.teardown_appcontext(close_db)

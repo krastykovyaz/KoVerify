@@ -158,26 +158,40 @@ own.
 
 ## Video verification
 
-Either person in a room can ask the other to prove who they are on video.
+Either person in a room can ask the other to prove who they are on video. The
+person asked records the proof on the page itself, so nothing is installed and
+no third party is involved.
 
 1. **Ask.** "Запросить видеопроверку" sends a request. The other person sees an
-   incoming banner (and the tab title flashes) and can accept or decline. A
-   request nobody answers lapses after two minutes.
-2. **Meet.** Once accepted, both get a button that opens a video call. The call
-   screen repeats the safety code: reading it aloud on camera is what ties the
-   video to the encrypted channel, so a swapped key cannot survive it.
-3. **Decide.** Whoever asked is the verifier. They press "подтверждаю" or "не
-   подтверждаю", and both screens show the result. A denial tells both people
-   not to share secrets. Either side can ask again, and the roles can swap.
+   incoming banner (and the tab title flashes) with three steps and the safety
+   code shown large. A request nobody answers lapses after two minutes.
+2. **Record.** "Включить камеру" asks the browser for the camera and microphone
+   only then. They say their name and the safety code (recording stops itself
+   after 20 seconds), review the recording, retake it if needed, and send it.
+   Browsers that cannot record on the page are pointed at the phone's own camera
+   app through a file picker; a refused camera is explained with a retry.
+3. **Watch and decide.** The asker plays the recording, which is decrypted in
+   their browser, and presses "подтверждаю" or "не подтверждаю". Both screens
+   show the verdict, a denial tells both people not to share secrets, and the
+   asker can watch it again. Either side can ask again, and the roles swap.
 
-The server only tracks the request, who asked, and the result, and each step is
-a single guarded update, so two people cannot start conflicting requests. It
-does not carry video. The call happens at `VIDEO_URL_TEMPLATE` (public Jitsi by
-default) in a room named by 128 bits that the two browsers derive from their
-shared secret; the server never sees it and nobody else can guess it. The
-provider can still see that a call happens and the video itself, so point the
-template at a self-hosted Jitsi if that matters. A built-in call was not built:
-it needs a TURN relay this host does not have.
+Saying the code on camera is what ties the video to the encrypted channel: a
+server that swapped keys cannot make the recorded words match.
+
+- **The server cannot watch it.** The recording is sealed in the browser under
+  the room key (AES-256-GCM, with its own authenticated-data label so it can
+  never be passed off as a message). The server stores one ciphertext file per
+  room, mode 0600, in `PROOFS_DIR`, never in the database.
+- **It is deleted with everything else.** Closing the room, the room expiring,
+  a new request, and the cleanup job all remove it; the job also removes any
+  file whose room no longer exists. A recording nobody judges lapses after 30
+  minutes. Deploys skip the folder and do not back it up.
+- **Limits.** `PROOF_MAX_MB` (default 12) caps one recording; only the upload
+  endpoint accepts a body that large, in the app and in nginx. Recordings are
+  capped at roughly 1 Mbit/s so 20 seconds is about 3 MB.
+- **What it does not do.** It does not detect a replayed or deepfaked video: a
+  human watches it and judges, and the spoken code, which only exists once the
+  room does, is the defence against a replay.
 
 ## Deploying
 

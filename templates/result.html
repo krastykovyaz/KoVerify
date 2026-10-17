@@ -93,6 +93,12 @@
     .video.bad  { border-color: #fecaca; background: #fef2f2 }
     .video-title { font-weight: 700; font-size: .9rem; color: #312e81; margin-bottom: 6px }
     .video-text { font-size: .85rem; color: #374151; line-height: 1.5; margin-bottom: 10px }
+    #video-stage video { width: 100%; max-height: 52vh; border-radius: 10px; background: #000; margin-bottom: 10px }
+    .steps { margin: 0 0 12px 18px; padding: 0; font-size: .85rem; line-height: 1.55; color: #374151 }
+    .steps li { margin-bottom: 4px }
+    .big-code { font: 700 1.3rem ui-monospace, monospace; color: #4c1d95; letter-spacing: 3px; text-align: center;
+                background: #fff; border: 1.5px dashed #a5b4fc; border-radius: 10px; padding: 8px; margin-bottom: 10px }
+    .rec-status { font-size: .85rem; font-weight: 600; color: #b91c1c; margin-bottom: 8px }
     .video-buttons { display: flex; gap: 8px; flex-wrap: wrap }
     .video-buttons button { flex: 1; min-width: 120px; padding: 10px; border: none; border-radius: 10px;
                             font: inherit; font-size: .9rem; font-weight: 600; cursor: pointer }
@@ -168,8 +174,7 @@
     <div class="video" id="video">
       <div class="video-title">📹 Видеопроверка</div>
       <div id="video-text" class="video-text"></div>
-      <a id="video-link" class="send" style="display:none;text-align:center;text-decoration:none"
-         target="_blank" rel="noopener noreferrer">Открыть видеозвонок</a>
+      <div id="video-stage"></div>
       <div class="video-buttons" id="video-buttons"></div>
     </div>
 
@@ -324,6 +329,7 @@
     document.getElementById('room-items').textContent = ''
     shown.clear()
     flashTitle(false)
+    resetRecording()
     document.getElementById('room-countdown').textContent = ''
     wipeStatusCard('🔒 Комната закрыта: все данные удалены')
     setRoomNote((message || 'Комната закрыта') + ' То, что вы скопировали, осталось только у вас.', 'expired')
@@ -605,8 +611,8 @@
     const key = v ? `${v.state}|${v.by}|${v.at}` : ''
     if (v && key !== prev.videoKey) {
       const mineAsked = v.by === state.slot
-      if (v.state === 'requested' && !mineAsked) say(first ? `${peer} ждёт вашей видеопроверки` : `${peer} просит пройти видеопроверку`)
-      else if (!first && v.state === 'active' && mineAsked) say(`${peer} принял(а) запрос: откройте видеозвонок`)
+      if (v.state === 'requested' && !mineAsked) say(first ? `${peer} ждёт вашего видео` : `${peer} просит записать короткое видео`)
+      else if (!first && v.state === 'recorded' && mineAsked) say(`${peer} записал(а) видео: посмотрите и решите`)
       else if (!first && v.state === 'declined' && mineAsked) say(`${peer} отклонил(а) запрос видеопроверки`)
       else if (!first && v.state === 'confirmed' && !mineAsked) say(`${peer} подтвердил(а) вашу личность по видео`)
       else if (!first && v.state === 'denied' && !mineAsked) say(`${peer} не подтвердил(а) вашу личность по видео`)
@@ -635,101 +641,275 @@
   })
 
   // ── Видеопроверка ──────────────────────────────────────────────────
-  // One person asks, the other accepts, they meet in a video call and the asker
-  // records whether they are satisfied. The server only tracks the request; the
-  // call happens at a link whose name only these two browsers can compute.
-  let videoNameFor = null, videoName = null, titleFlash = null
+  // One person asks. The other records a short video right here, saying their
+  // name and the safety code. It is encrypted in their browser under the room
+  // key and uploaded; the asker watches it and decides. The server stores only
+  // ciphertext, for as long as the room lives.
+  const MAX_SECONDS = 20
+  let recStream = null, recorder = null, recChunks = [], recMime = '', recBlob = null
+  let recTimer = null, recUrl = null, viewUrl = null, lastVideoKey = null, viewing = false
   const BASE_TITLE = document.title
+  let titleFlash = null
+
+  function stopCamera() {
+    if (recStream) recStream.getTracks().forEach(t => t.stop())
+    recStream = null
+  }
+  function resetRecording() {
+    clearInterval(recTimer); recTimer = null
+    if (recorder && recorder.state === 'recording') { try { recorder.stop() } catch (e) {} }
+    recorder = null; recChunks = []; recBlob = null
+    stopCamera()
+    if (recUrl) { URL.revokeObjectURL(recUrl); recUrl = null }
+    if (viewUrl) { URL.revokeObjectURL(viewUrl); viewUrl = null }
+    viewing = false
+  }
+
+  async function blobBytes(blob) {
+    if (blob.arrayBuffer) return new Uint8Array(await blob.arrayBuffer())
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result))
+      reader.onerror = reject
+      reader.readAsArrayBuffer(blob)
+    })
+  }
 
   async function videoAction(action) {
     setRoomError('')
     const { body } = await roomApi('/video', { method: 'POST', body: JSON.stringify({ action }) })
     if (!body || !body.ok) setRoomError((body && body.reason) || 'Не удалось выполнить действие.')
+    lastVideoKey = null
     pollRoomNow()
   }
 
-  function videoButton(label, cls, action) {
+  function videoButton(label, cls, handler) {
     const b = document.createElement('button')
     b.type = 'button'; b.className = cls; b.textContent = label
-    b.onclick = () => { b.disabled = true; videoAction(action) }
+    b.onclick = () => { b.disabled = true; Promise.resolve(handler()).finally(() => { b.disabled = false }) }
     return b
   }
+  const act = (action) => () => videoAction(action)
 
-  function titleNow() { return (unread > 0 ? `(${unread}) ` : '') + BASE_TITLE }
-  function refreshTitle() { if (!titleFlash) document.title = titleNow() }
+  function para(text, cls) {
+    const d = document.createElement('div')
+    d.className = cls || 'video-text'; d.textContent = text
+    return d
+  }
+
+  function safetyText() { return document.getElementById('room-safety').textContent }
 
   function flashTitle(on) {
     if (on && !titleFlash) {
       let flip = false
       titleFlash = setInterval(() => {
-        document.title = (flip = !flip) ? '📹 Запрос видеопроверки' : titleNow()
+        document.title = (flip = !flip) ? '📹 Просят видео' : titleNow()
       }, 1000)
     } else if (!on && titleFlash) {
       clearInterval(titleFlash); titleFlash = null; document.title = titleNow()
     }
   }
+  function titleNow() { return (unread > 0 ? `(${unread}) ` : '') + BASE_TITLE }
+  function refreshTitle() { if (!titleFlash) document.title = titleNow() }
+
+  // ----- the person being asked: record, review, send -----
+  function pickMime() {
+    if (typeof MediaRecorder === 'undefined') return ''
+    for (const m of ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']) {
+      if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m
+    }
+    return ''
+  }
+
+  function recordingSupported() {
+    return typeof MediaRecorder !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+  }
+
+  async function startCamera(stage, buttons, peer) {
+    stage.textContent = ''; buttons.textContent = ''
+    try {
+      recStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: true,
+      })
+    } catch (e) {
+      stage.append(para('Не удалось включить камеру. Разрешите доступ к камере и микрофону для этого сайта в настройках браузера и попробуйте снова.', 'rec-status'))
+      buttons.append(videoButton('Попробовать снова', 'vb-primary', () => startCamera(stage, buttons, peer)),
+                     videoButton('Отклонить', 'vb-bad', act('decline')))
+      return
+    }
+    const preview = document.createElement('video')
+    preview.muted = true; preview.autoplay = true; preview.playsInline = true
+    preview.setAttribute('playsinline', ''); preview.srcObject = recStream
+    stage.append(para(`Скажите вслух своё имя и код сверки ${safetyText()}. Запись остановится сама через ${MAX_SECONDS} секунд.`), preview)
+    buttons.append(videoButton('● Начать запись', 'vb-primary', () => startRecording(stage, buttons, peer)),
+                   videoButton('Отмена', 'vb-quiet', () => { resetRecording(); renderVideoNow() }))
+  }
+
+  function startRecording(stage, buttons, peer) {
+    recChunks = []; recMime = pickMime()
+    try {
+      recorder = new MediaRecorder(recStream, Object.assign({ videoBitsPerSecond: 900000, audioBitsPerSecond: 64000 },
+                                                            recMime ? { mimeType: recMime } : {}))
+    } catch (e) { setRoomError('Этот браузер не умеет записывать видео здесь.'); return }
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data) }
+    recorder.onstop = () => { finishRecording(stage, buttons, peer) }
+    recorder.start()
+    buttons.textContent = ''
+    const status = para('', 'rec-status'); stage.prepend(status)
+    let left = MAX_SECONDS
+    const tick = () => { status.textContent = `● Идёт запись… ${left} с`; if (left-- <= 0) stopNow() }
+    const stopNow = () => { clearInterval(recTimer); recTimer = null; if (recorder && recorder.state === 'recording') recorder.stop() }
+    tick(); recTimer = setInterval(tick, 1000)
+    buttons.append(videoButton('■ Остановить', 'vb-primary', stopNow))
+  }
+
+  function finishRecording(stage, buttons, peer) {
+    stopCamera()
+    recBlob = new Blob(recChunks, { type: (recorder && recorder.mimeType) || recMime || 'video/webm' })
+    stage.textContent = ''; buttons.textContent = ''
+    if (recBlob.size === 0) {
+      stage.append(para('Запись получилась пустой. Попробуйте ещё раз.', 'rec-status'))
+      buttons.append(videoButton('Записать заново', 'vb-primary', () => startCamera(stage, buttons, peer)))
+      return
+    }
+    recUrl = URL.createObjectURL(recBlob)
+    const playback = document.createElement('video')
+    playback.controls = true; playback.playsInline = true
+    playback.setAttribute('playsinline', ''); playback.src = recUrl
+    stage.append(para('Проверьте запись: должны быть видны ваше лицо и слышны имя и код.'), playback)
+    buttons.append(videoButton(`Отправить ${peer}`, 'vb-good', () => sendRecording(stage, buttons, peer)),
+                   videoButton('Записать заново', 'vb-quiet', () => startCamera(stage, buttons, peer)))
+  }
+
+  async function sendRecording(stage, buttons, peer) {
+    setRoomError('')
+    const note = para('Шифруем и отправляем…'); stage.append(note)
+    try {
+      const sealed = await RC.encryptBytes(roomKey, CODE, seat.slot, recBlob.type || 'video/webm', await blobBytes(recBlob))
+      const res = await fetch(`/api/session/${CODE}/room/video/proof`, {
+        method: 'POST', body: sealed.ciphertext,
+        headers: { 'X-Room-Token': seat.token, 'X-Proof-IV': sealed.iv, 'Content-Type': 'application/octet-stream' },
+      })
+      const body = await res.json().catch(() => null)
+      if (!body || !body.ok) throw new Error((body && body.reason) || 'Не удалось отправить видео.')
+      resetRecording(); lastVideoKey = null; pollRoomNow()
+    } catch (e) {
+      note.textContent = ''
+      setRoomError(e.message || 'Не удалось отправить видео.')
+    }
+  }
+
+  // Without a camera API the phone's own camera app can still record the video.
+  function fileFallback(stage, buttons, peer) {
+    const label = para('Этот браузер не записывает видео прямо на странице. Запишите короткое видео камерой телефона: назовите имя и код сверки ' + safetyText() + '.')
+    const input = document.createElement('input')
+    input.type = 'file'; input.accept = 'video/*'; input.setAttribute('capture', 'user')
+    input.onchange = () => {
+      const file = input.files && input.files[0]
+      if (!file) return
+      if (file.size > 12 * 1024 * 1024) { setRoomError('Видео слишком большое: запишите покороче (до 12 МБ).'); return }
+      recBlob = file
+      stage.textContent = ''; buttons.textContent = ''
+      buttons.append(videoButton(`Отправить ${peer}`, 'vb-good', () => sendRecording(stage, buttons, peer)))
+    }
+    stage.append(label, input)
+  }
+
+  // ----- the asker: fetch, decrypt, watch, decide -----
+  async function showProof(stage, peer, fromSlotHint) {
+    const note = para('Загружаем и расшифровываем…'); stage.append(note)
+    try {
+      const res = await fetch(`/api/session/${CODE}/room/video/proof`, { headers: { 'X-Room-Token': seat.token } })
+      if (!res.ok) throw new Error('Видео недоступно.')
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      const opened = await RC.decryptBytes(roomKey, CODE, res.headers.get('X-Proof-From') || fromSlotHint,
+                                           res.headers.get('X-Proof-IV'), bytes)
+      if (viewUrl) URL.revokeObjectURL(viewUrl)
+      viewUrl = URL.createObjectURL(new Blob([opened.bytes], { type: opened.mime }))
+      const player = document.createElement('video')
+      player.controls = true; player.playsInline = true
+      player.setAttribute('playsinline', ''); player.src = viewUrl
+      note.remove(); stage.append(player)
+      viewing = true
+    } catch (e) {
+      note.textContent = 'Не удалось расшифровать видео. Возможно, оно повреждено: не подтверждайте.'
+      note.className = 'rec-status'
+    }
+  }
+
+  function renderVideoNow() { lastVideoKey = null; if (lastState) renderVideo(lastState) }
+  let lastState = null
 
   async function renderVideo(state) {
+    lastState = state
     const box = document.getElementById('video')
     const text = document.getElementById('video-text')
-    const link = document.getElementById('video-link')
+    const stage = document.getElementById('video-stage')
     const buttons = document.getElementById('video-buttons')
     const peer = state.peer.name || 'собеседник'
     const v = state.video
     const mineIsAsker = v && v.by === state.slot
     const askerName = v ? (mineIsAsker ? 'Вы' : peer) : ''
 
+    // Poll after poll nothing changes; do not tear down a camera or a player.
+    const key = v ? `${v.state}|${v.by}|${v.at}|${v.proof ? v.proof.at : ''}` : ''
+    if (key === lastVideoKey) return
+    lastVideoKey = key
+
+    resetRecording()
     box.className = 'video'
-    link.style.display = 'none'
-    buttons.textContent = ''
+    stage.textContent = ''; buttons.textContent = ''
     flashTitle(false)
 
-    if (v && v.state === 'active') {
-      // Both ends compute the same unguessable meeting name locally.
-      if (videoNameFor !== state.peer.public_key) {
-        videoName = await RC.videoRoomName(seat.privateJwk, state.peer.public_key, CODE)
-        videoNameFor = state.peer.public_key
-      }
-      const url = state.video_url_template.replace('{room}', videoName)
-      if (url.startsWith('https://')) { link.href = url; link.style.display = 'block' }
-    }
-
     if (!v) {
-      text.textContent = `Хотите убедиться, что на связи действительно ${peer}? Попросите его выйти на видео.`
-      buttons.append(videoButton('Запросить видеопроверку', 'vb-primary', 'request'))
+      text.textContent = `Хотите убедиться, что на связи действительно ${peer}? Попросите короткое видео: ${peer} запишет его прямо на этой странице, назовёт своё имя и код сверки, а вы посмотрите и решите.`
+      buttons.append(videoButton('Запросить видеопроверку', 'vb-primary', act('request')))
     } else if (v.state === 'requested' && mineIsAsker) {
-      text.textContent = `Запрос отправлен. Ждём ответа от ${peer}…`
-      buttons.append(videoButton('Отменить запрос', 'vb-quiet', 'cancel'))
+      text.textContent = `Запрос отправлен. ${peer} увидит инструкцию и запишет короткое видео. Ждём…`
+      buttons.append(videoButton('Отменить запрос', 'vb-quiet', act('cancel')))
     } else if (v.state === 'requested') {
       box.className = 'video incoming'
       flashTitle(true)
-      text.textContent = `${peer} просит пройти видеопроверку: вы вместе откроете видеозвонок, и он убедится, что это вы.`
-      buttons.append(videoButton('Принять', 'vb-primary', 'accept'), videoButton('Отклонить', 'vb-bad', 'decline'))
-    } else if (v.state === 'active') {
-      const safety = document.getElementById('room-safety').textContent
-      text.textContent = mineIsAsker
-        ? `Откройте видеозвонок. Убедитесь, что это ${peer}, и назовите друг другу код сверки ${safety}. Затем отметьте результат.`
-        : `Откройте видеозвонок: ${peer} проверяет вашу личность. Назовите вслух код сверки ${safety}.`
-      if (mineIsAsker) {
-        buttons.append(videoButton('Это он(а): подтверждаю', 'vb-good', 'confirm'),
-                       videoButton('Не подтверждаю', 'vb-bad', 'deny'))
-      } else {
-        const wait = document.createElement('div')
-        wait.className = 'video-text'; wait.textContent = `Ждём решения ${peer}…`
-        buttons.append(wait)
+      text.textContent = `${peer} просит доказать, что это вы, коротким видео:`
+      const steps = document.createElement('ol'); steps.className = 'steps'
+      for (const line of ['Нажмите «Включить камеру» и разрешите доступ к камере и микрофону.',
+                          'Посмотрите в камеру и скажите вслух своё имя и код сверки, показанный ниже.',
+                          'Нажмите «Остановить», проверьте запись и нажмите «Отправить».']) {
+        const li = document.createElement('li'); li.textContent = line; steps.append(li)
       }
+      const code = document.createElement('div'); code.className = 'big-code'; code.textContent = safetyText()
+      stage.append(steps, code)
+      if (recordingSupported()) {
+        buttons.append(videoButton('Включить камеру', 'vb-primary', () => startCamera(stage, buttons, peer)),
+                       videoButton('Отклонить', 'vb-bad', act('decline')))
+      } else {
+        fileFallback(stage, buttons, peer)
+        buttons.append(videoButton('Отклонить', 'vb-bad', act('decline')))
+      }
+    } else if (v.state === 'recorded' && mineIsAsker) {
+      box.className = 'video incoming'
+      text.textContent = `${peer} записал(а) видео. В нём должны быть видны лицо и звучать имя и код сверки ${safetyText()}.`
+      stage.append(para('Видео зашифровано между вами двумя: сервер его не видит.'))
+      buttons.append(videoButton('▶ Посмотреть видео', 'vb-primary', () => showProof(stage, peer, state.slot === 'a' ? 'b' : 'a')),
+                     videoButton('Подтверждаю', 'vb-good', act('confirm')),
+                     videoButton('Не подтверждаю', 'vb-bad', act('deny')))
+    } else if (v.state === 'recorded') {
+      text.textContent = `Видео отправлено. Ждём решения ${peer}. Можно записать заново.`
+      if (recordingSupported()) buttons.append(videoButton('Записать заново', 'vb-quiet', () => startCamera(stage, buttons, peer)))
     } else if (v.state === 'confirmed') {
       box.className = 'video good'
       text.textContent = `✅ ${askerName} подтвердил(а) личность собеседника по видео.`
-      buttons.append(videoButton('Запросить снова', 'vb-quiet', 'request'))
+      if (mineIsAsker && v.proof) buttons.append(videoButton('▶ Посмотреть снова', 'vb-quiet', () => showProof(stage, peer, state.slot === 'a' ? 'b' : 'a')))
+      buttons.append(videoButton('Запросить снова', 'vb-quiet', act('request')))
     } else if (v.state === 'denied') {
       box.className = 'video bad'
       text.textContent = `⚠️ ${askerName} не подтвердил(а) личность собеседника по видео. Не передавайте секреты, пока не разберётесь.`
-      buttons.append(videoButton('Запросить снова', 'vb-quiet', 'request'))
+      if (mineIsAsker && v.proof) buttons.append(videoButton('▶ Посмотреть снова', 'vb-quiet', () => showProof(stage, peer, state.slot === 'a' ? 'b' : 'a')))
+      buttons.append(videoButton('Запросить снова', 'vb-quiet', act('request')))
     } else if (v.state === 'declined') {
       box.className = 'video bad'
       text.textContent = mineIsAsker ? `${peer} отклонил(а) запрос видеопроверки.` : 'Вы отклонили запрос видеопроверки.'
-      buttons.append(videoButton('Запросить снова', 'vb-quiet', 'request'))
+      buttons.append(videoButton('Запросить снова', 'vb-quiet', act('request')))
     }
   }
 

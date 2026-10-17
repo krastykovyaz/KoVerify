@@ -23,7 +23,6 @@
   const dec = new TextDecoder()
   const CURVE = { name: 'ECDH', namedCurve: 'P-256' }
   const LABEL = 'verifier-room-v1'
-  const VIDEO_LABEL = 'verifier-room-video-v1'
   const FIELDS = ['login', 'password', 'code', 'key', 'note']
 
   function toB64(bytes) {
@@ -108,19 +107,31 @@
     return cleanFields(parsed.fields)
   }
 
-  // The name of the video meeting, derived from the same ECDH secret as the
-  // message key but under its own label. Both browsers compute the same 128-bit
-  // value; the server only ever sees public keys, so it cannot, and nobody else
-  // can guess it.
-  async function videoRoomName(privateJwk, peerPublicB64, code) {
-    const priv = await crypto.subtle.importKey('jwk', privateJwk, CURVE, false, ['deriveBits'])
-    const pub = await crypto.subtle.importKey('raw', fromB64(peerPublicB64), CURVE, false, [])
-    const secret = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, priv, 256)
-    const material = await crypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveBits'])
-    const bits = new Uint8Array(await crypto.subtle.deriveBits(
-      { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(code), info: enc.encode(VIDEO_LABEL) }, material, 128,
-    ))
-    return 'verifier-' + Array.from(bits, b => b.toString(16).padStart(2, '0')).join('')
+  // A recorded video proof. Sealed under the same room key as messages but with
+  // its own AAD label, so a message ciphertext can never be passed off as a
+  // proof or the other way round. The plaintext is framed as
+  //   [2-byte header length][JSON header {v, mime}][video bytes]
+  // so the receiving browser knows how to play it without the server ever
+  // learning what it is.
+  async function encryptBytes(key, code, fromSlot, mime, bytes) {
+    const header = enc.encode(JSON.stringify({ v: 1, mime }))
+    const plain = new Uint8Array(2 + header.length + bytes.length)
+    plain[0] = header.length >> 8; plain[1] = header.length & 255
+    plain.set(header, 2); plain.set(bytes, 2 + header.length)
+    const iv = crypto.getRandomValues(new Uint8Array(12))
+    const sealed = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: enc.encode(`${code}|${fromSlot}|proof`) }, key, plain)
+    return { iv: toB64(iv), ciphertext: new Uint8Array(sealed) }
+  }
+
+  async function decryptBytes(key, code, fromSlot, ivB64, ciphertext) {
+    const opened = new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: fromB64(ivB64), additionalData: enc.encode(`${code}|${fromSlot}|proof`) },
+      key, ciphertext))
+    const length = (opened[0] << 8) | opened[1]
+    const header = JSON.parse(dec.decode(opened.subarray(2, 2 + length)))
+    if (!header || header.v !== 1 || typeof header.mime !== 'string') throw new Error('format')
+    return { mime: header.mime, bytes: opened.subarray(2 + length) }
   }
 
   // Ten digits both people read aloud. If the server swapped either public key,
@@ -136,5 +147,5 @@
     return `${digits.slice(0, 5)} ${digits.slice(5)}`
   }
 
-  return { FIELDS, generateIdentity, commitment, keyMatchesCommitment, deriveRoomKey, encryptItem, decryptItem, safetyCode, videoRoomName, toB64, fromB64 }
+  return { FIELDS, generateIdentity, commitment, keyMatchesCommitment, deriveRoomKey, encryptItem, decryptItem, encryptBytes, decryptBytes, safetyCode, toB64, fromB64 }
 })

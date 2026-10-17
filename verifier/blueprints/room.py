@@ -20,13 +20,14 @@ seconds. With it, the server gets one blind guess in ten billion.
 import base64
 import binascii
 import hashlib
+import os
 import re
 from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric import ec
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 
-from ..db import close_room, get_db, parse_ts, utcnow
+from ..db import close_room, delete_proof, get_db, parse_ts, proof_path, utcnow
 from ..security import client_ip, constant_time_equals, hash_token, rate_limit
 
 bp = Blueprint("room", __name__, url_prefix="/api/session/<code>/room")
@@ -49,11 +50,17 @@ def commitment_of(public_key_b64):
 PRESENCE_WINDOW = timedelta(seconds=12)
 
 VIDEO_REQUEST_TTL = timedelta(seconds=120)
-VIDEO_ACTIVE_TTL = timedelta(minutes=30)
+VIDEO_RECORDED_TTL = timedelta(minutes=30)
 
 
 def _cfg():
     return current_app.config["VERIFIER"]
+
+
+@bp.before_request
+def _allow_a_larger_body_for_proof_uploads():
+    if request.endpoint == "room.upload_proof":
+        request.max_content_length = _cfg().proof_max_bytes + 1024
 
 
 def _fail(reason, status):
@@ -106,7 +113,7 @@ def _authorize(code):
     expires = parse_ts(row["expires_at"])
     if row["closed_at"] or (expires is not None and utcnow() > expires):
         if not row["closed_at"]:
-            close_room(conn, code)
+            close_room(conn, code, _cfg().proofs_dir)
             conn.commit()
         return _fail("комната закрыта, все данные удалены", 410)
 
@@ -146,9 +153,12 @@ def _video_view(row):
     now = utcnow()
     if state == "requested" and now - at > VIDEO_REQUEST_TTL:
         return None
-    if state == "active" and now - at > VIDEO_ACTIVE_TTL:
+    if state == "recorded" and now - at > VIDEO_RECORDED_TTL:
         return None
-    return {"state": state, "by": by, "at": row["video_at"]}
+    view = {"state": state, "by": by, "at": row["video_at"]}
+    if state in ("recorded", "confirmed", "denied") and row["proof_iv"]:
+        view["proof"] = {"iv": row["proof_iv"], "size": row["proof_size"], "at": row["proof_at"]}
+    return view
 
 
 @bp.route("", methods=["GET"])
@@ -172,7 +182,6 @@ def room_state(code):
         "ready": bool(you["verified"] and other["verified"]
                       and you["public_key"] and other["public_key"]),
         "video": _video_view(row),
-        "video_url_template": _cfg().video_url_template,
         "items": [
             {"id": i["id"], "from": i["from_slot"], "iv": i["iv"],
              "ciphertext": i["ciphertext"], "created_at": i["created_at"]}
@@ -281,27 +290,33 @@ def delete_item(code, item_id):
 
 # What may happen to a video verification, and who may do it. The requester is
 # the verifier: they asked to see the other person and they decide the outcome.
-# Every transition is one UPDATE that carries its own precondition, so two
-# racing requests cannot both win.
+# The other person answers by recording a short video in their browser; it is
+# encrypted there and uploaded as the proof. Every transition is one UPDATE
+# that carries its own precondition, so two racing requests cannot both win.
 _FREE = (
     "(video_state IS NULL OR video_state IN ('declined','confirmed','denied') "
     "OR (video_state='requested' AND video_at < :request_cutoff) "
-    "OR (video_state='active' AND video_at < :active_cutoff))"
+    "OR (video_state='recorded' AND video_at < :recorded_cutoff))"
 )
 _VIDEO_ACTIONS = {
-    # action: (new state, who must act, precondition)
-    "request": ("'requested'", "me", _FREE),
-    "cancel":  ("NULL", "requester",
-                "video_state='requested' AND video_by=:me"),
-    "accept":  ("'active'", "other",
+    # action: (new state, precondition)
+    "request": ("'requested'", _FREE),
+    "cancel":  ("NULL", "video_state='requested' AND video_by=:me"),
+    "decline": ("'declined'",
                 "video_state='requested' AND video_by=:other AND video_at >= :request_cutoff"),
-    "decline": ("'declined'", "other",
-                "video_state='requested' AND video_by=:other AND video_at >= :request_cutoff"),
-    "confirm": ("'confirmed'", "requester",
-                "video_state='active' AND video_by=:me AND video_at >= :active_cutoff"),
-    "deny":    ("'denied'", "requester",
-                "video_state='active' AND video_by=:me AND video_at >= :active_cutoff"),
+    "confirm": ("'confirmed'",
+                "video_state='recorded' AND video_by=:me AND video_at >= :recorded_cutoff"),
+    "deny":    ("'denied'",
+                "video_state='recorded' AND video_by=:me AND video_at >= :recorded_cutoff"),
 }
+
+
+def _video_params(code, slot, other, now):
+    return {
+        "now": now.isoformat(), "code": code, "me": slot, "other": other,
+        "request_cutoff": (now - VIDEO_REQUEST_TTL).isoformat(),
+        "recorded_cutoff": (now - VIDEO_RECORDED_TTL).isoformat(),
+    }
 
 
 @bp.route("/video", methods=["POST"])
@@ -320,37 +335,115 @@ def video(code):
         if not ready:
             return _fail("собеседник ещё не готов: видеопроверка станет доступна позже", 409)
 
-    new_state, _who, condition = _VIDEO_ACTIONS[action]
+    new_state, condition = _VIDEO_ACTIONS[action]
     now = utcnow()
-    by = ":me" if action == "request" else "video_by"
+    if action == "request":
+        # A new request starts clean: the previous proof, if any, is gone.
+        delete_proof(_cfg().proofs_dir, code)
+        assignment = (f"video_state={new_state}, video_by=:me, video_at=:now, "
+                      "proof_iv=NULL, proof_size=NULL, proof_at=NULL")
+    elif new_state == "NULL":
+        assignment = "video_state=NULL, video_by=NULL, video_at=:now"
+    else:
+        assignment = f"video_state={new_state}, video_at=:now"
     cursor = conn.execute(
-        f"UPDATE sessions SET video_state={new_state}, video_by={by if new_state != 'NULL' else 'NULL'}, "
-        f"video_at=:now WHERE code=:code AND {condition}",
-        {
-            "now": now.isoformat(), "code": code, "me": slot, "other": other,
-            "request_cutoff": (now - VIDEO_REQUEST_TTL).isoformat(),
-            "active_cutoff": (now - VIDEO_ACTIVE_TTL).isoformat(),
-        },
+        f"UPDATE sessions SET {assignment} WHERE code=:code AND {condition}",
+        _video_params(code, slot, other, now),
     )
     conn.commit()
     if cursor.rowcount != 1:
         return _fail("это действие сейчас недоступно", 409)
+    if new_state == "NULL":
+        delete_proof(_cfg().proofs_dir, code)
     fresh = conn.execute("SELECT * FROM sessions WHERE code=?", (code,)).fetchone()
     return jsonify({"ok": True, "video": _video_view(fresh)})
+
+
+@bp.route("/video/proof", methods=["POST"])
+def upload_proof(code):
+    """The person asked to prove themselves uploads their encrypted recording.
+
+    The body is raw ciphertext (AES-GCM, sealed in the browser under the room
+    key); the IV travels in a header. The server cannot play it and keeps one
+    file per room, deleted with the room, with the request, or on re-recording.
+    """
+    auth = _authorize(code)
+    if not isinstance(auth, tuple) or len(auth) != 3:
+        return auth
+    conn, row, slot = auth
+    other = "b" if slot == "a" else "a"
+    cfg = _cfg()
+
+    iv = request.headers.get("X-Proof-IV", "")
+    if _b64(iv, exact=IV_BYTES) is None:
+        return _fail("некорректный вектор инициализации", 400)
+    # Refuse early when the size is declared; when it is not, the body is still
+    # capped as it is read (max_content_length), so nothing unbounded is buffered.
+    declared = request.content_length
+    if declared is not None and declared > cfg.proof_max_bytes:
+        return _fail(f"видео слишком большое (предел {cfg.proof_max_bytes // (1024 * 1024)} МБ)", 413)
+    data = request.get_data(cache=False)
+    if len(data) <= GCM_TAG_BYTES or len(data) > cfg.proof_max_bytes:
+        return _fail("видео пустое или слишком большое", 400)
+
+    now = utcnow()
+    # Only the person who was asked, while the request stands or to replace
+    # their own earlier recording before it was judged.
+    cursor = conn.execute(
+        "UPDATE sessions SET video_state='recorded', video_at=:now, proof_iv=:iv, "
+        "proof_size=:size, proof_at=:now WHERE code=:code AND video_by=:other AND ("
+        "(video_state='requested' AND video_at >= :request_cutoff) OR "
+        "(video_state='recorded' AND video_at >= :recorded_cutoff))",
+        {**_video_params(code, slot, other, now), "iv": iv, "size": len(data)},
+    )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        return _fail("сейчас видео не ожидается", 409)
+    path = proof_path(cfg.proofs_dir, code)
+    tmp = path + ".part"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+    conn.commit()
+    fresh = conn.execute("SELECT * FROM sessions WHERE code=?", (code,)).fetchone()
+    return jsonify({"ok": True, "video": _video_view(fresh)})
+
+
+@bp.route("/video/proof", methods=["GET"])
+def download_proof(code):
+    """Either seat may fetch the ciphertext; only the room key opens it."""
+    auth = _authorize(code)
+    if not isinstance(auth, tuple) or len(auth) != 3:
+        return auth
+    conn, row, slot = auth
+    view = _video_view(row)
+    if not view or "proof" not in view:
+        return _fail("видео нет", 404)
+    try:
+        with open(proof_path(_cfg().proofs_dir, code), "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return _fail("видео нет", 404)
+    response = Response(data, mimetype="application/octet-stream")
+    response.headers["X-Proof-IV"] = row["proof_iv"]
+    response.headers["X-Proof-From"] = "b" if row["video_by"] == "a" else "a"
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @bp.route("/close", methods=["POST"])
 def close(code):
     """Close the room now and delete everything in it, for both people.
 
-    Items, public keys, seat tokens, names, methods and video state are wiped.
-    Both browsers learn of it on their next poll and wipe their own copy of the
-    private key.
+    Items, public keys, seat tokens, names, methods, video state and the proof
+    recording are wiped. Both browsers learn of it on their next poll and wipe
+    their own copy of the private key.
     """
     auth = _authorize(code)
     if not isinstance(auth, tuple) or len(auth) != 3:
         return auth
     conn, _row, _slot = auth
-    close_room(conn, code)
+    close_room(conn, code, _cfg().proofs_dir)
     conn.commit()
     return jsonify({"ok": True})

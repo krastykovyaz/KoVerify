@@ -115,3 +115,19 @@ def test_deploy_fails_when_workers_needed_a_restart_to_boot():
     assert "NRestarts" in DEPLOY
     block = DEPLOY[DEPLOY.index("NRestarts"):DEPLOY.index('log "health check passed"')]
     assert "rollback" in block and "die" in block
+
+
+def test_deploys_neither_delete_nor_back_up_the_recordings():
+    """rsync --delete would remove the proofs folder, and a backup would keep
+    ciphertext of live rooms. Both sync and backup and rollback must skip it."""
+    lines = [l for l in DEPLOY.splitlines() if "rsync" in l or "--exclude" in l]
+    assert sum("--exclude proofs/" in l for l in DEPLOY.splitlines()) >= 3, lines
+
+
+def test_the_proof_upload_has_its_own_larger_body_limit_in_nginx():
+    conf = open("deploy/nginx-verifier.conf").read()
+    block = conf[conf.index("room/video/proof"):]
+    block = block[:block.index("}")]
+    assert "client_max_body_size 13m" in block and "proxy_request_buffering off" in block
+    assert "verifier-proxy.conf" in block          # still carries the authentication headers
+    assert "client_max_body_size    1m;" in conf   # everything else stays small

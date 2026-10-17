@@ -78,19 +78,10 @@ class Config:
         # Per client and room: a page polls every 3 s, so 20 a minute each.
         self.rl_room = (int(env.get("RL_ROOM_MAX", "240")), 60)
 
-        # Where a video verification takes place. {room} is replaced in the two
-        # browsers with a name derived from their shared secret, so this server
-        # never learns it. Point it at a self-hosted Jitsi to keep video off a
-        # third party.
-        self.video_url_template = (
-            env.get("VIDEO_URL_TEMPLATE") or "https://meet.jit.si/{room}"
-        ).strip()
-        if (not self.video_url_template.startswith("https://")
-                or self.video_url_template.count("{room}") != 1
-                or any(ch in self.video_url_template for ch in " \t\r\n\"'<>")):
-            raise ConfigError(
-                "VIDEO_URL_TEMPLATE must be an https:// URL containing {room} exactly once"
-            )
+        # A video proof is recorded in the browser, encrypted there, and stored
+        # as one file per room until the room closes. Ciphertext bytes.
+        self.proof_max_bytes = int(env.get("PROOF_MAX_MB", "12")) * 1024 * 1024
+        self.proofs_dir = env.get("PROOFS_DIR", os.path.join(base, "proofs"))
 
         self._validate()
 

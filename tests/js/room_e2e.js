@@ -1,5 +1,6 @@
 // Two browsers, one live server, the real client crypto. Prints a JSON report.
 const crypto = require('node:crypto')
+const crypto2 = globalThis.crypto
 const RC = require('../../templates/static/room-crypto.js')
 
 const BASE = process.env.BASE
@@ -77,20 +78,43 @@ const rejects = async (promise) => { try { await promise; return false } catch (
   const safetyB = await RC.safetyCode(stateB.you.public_key, stateB.peer.public_key, code)
   ok('both screens show the same safety code', safetyA === safetyB && /^\d{5} \d{5}$/.test(safetyA))
 
+
   const keyA = await RC.deriveRoomKey(A.privateJwk, stateA.peer.public_key, code)
   const keyB = await RC.deriveRoomKey(B.privateJwk, stateB.peer.public_key, code)
+  const proofKeyA = keyA, proofKeyB = keyB
 
-  // The video meeting's name: both browsers agree, nobody else can compute it.
-  const nameA = await RC.videoRoomName(A.privateJwk, stateA.peer.public_key, code)
-  const nameB = await RC.videoRoomName(B.privateJwk, stateB.peer.public_key, code)
-  ok('both browsers derive the same video room name', nameA === nameB && /^verifier-[0-9a-f]{32}$/.test(nameA))
-  ok('the name differs from room to room', nameA !== await RC.videoRoomName(A.privateJwk, stateA.peer.public_key, 'ZZZZ2345'))
-  const outsider = await RC.generateIdentity()
-  ok('someone with only the public keys cannot derive it',
-     nameA !== await RC.videoRoomName(outsider.privateJwk, stateA.peer.public_key, code))
-  const everythingServerSaw = JSON.stringify([stateA, stateB])
-  ok('the server never saw the name or the secret behind it',
-     !everythingServerSaw.includes(nameA) && !everythingServerSaw.includes(nameA.slice('verifier-'.length)))
+  // A recorded video proof: asked by A, recorded by B, over the real endpoints.
+  ok('A can ask for a video verification', (await api('POST', `/api/session/${code}/room/video`, A.token, { action: 'request' })).status === 200)
+  const MARKER = 'RIFF-FAKE-WEBM-PLAINTEXT-MARKER-0123456789'
+  const video = Buffer.concat([Buffer.from(MARKER), crypto.randomBytes(4000)])
+  const sealedProof = await RC.encryptBytes(proofKeyB, code, B.slot, 'video/webm', new Uint8Array(video))
+  const up = await fetch(`${BASE}/api/session/${code}/room/video/proof`, {
+    method: 'POST', body: sealedProof.ciphertext,
+    headers: { 'X-Room-Token': B.token, 'X-Proof-IV': sealedProof.iv, 'Content-Type': 'application/octet-stream' },
+  })
+  ok('B uploads the encrypted recording', up.status === 200)
+  ok('the stored bytes are not the recording', !Buffer.from(sealedProof.ciphertext).includes(Buffer.from(MARKER)) && sealedProof.ciphertext.length > video.length)
+  const down = await fetch(`${BASE}/api/session/${code}/room/video/proof`, { headers: { 'X-Room-Token': A.token } })
+  const downBytes = new Uint8Array(await down.arrayBuffer())
+  ok('A downloads exactly what B uploaded', down.status === 200 && Buffer.compare(Buffer.from(downBytes), Buffer.from(sealedProof.ciphertext)) === 0)
+  const openedProof = await RC.decryptBytes(proofKeyA, code, down.headers.get('X-Proof-From'), down.headers.get('X-Proof-IV'), downBytes)
+  ok('A decrypts the video and its type', Buffer.compare(Buffer.from(openedProof.bytes), video) === 0 && openedProof.mime === 'video/webm')
+  const flippedProof = Uint8Array.from(downBytes); flippedProof[10] ^= 1
+  ok('a tampered recording is rejected', await rejects(RC.decryptBytes(proofKeyA, code, B.slot, down.headers.get('X-Proof-IV'), flippedProof)))
+  ok('it does not open as if A had recorded it', await rejects(RC.decryptBytes(proofKeyA, code, A.slot, down.headers.get('X-Proof-IV'), downBytes)))
+  ok('it does not open in another room', await rejects(RC.decryptBytes(await RC.deriveRoomKey(A.privateJwk, B.publicB64, 'ZZZZ2345'), 'ZZZZ2345', B.slot, down.headers.get('X-Proof-IV'), downBytes)))
+  // Domain separation must hold at the authentication layer, not merely because
+  // the two formats fail to parse as each other: try the raw decryption with the
+  // other kind's authenticated data and demand the cipher itself refuse.
+  const msg = await RC.encryptItem(proofKeyB, code, B.slot, { note: 'hello' })
+  const rawOpen = (key, iv, ct, label) => crypto2.subtle.decrypt(
+    { name: 'AES-GCM', iv: Buffer.from(iv, 'base64'), additionalData: new TextEncoder().encode(`${code}|${B.slot}${label}`) }, key, ct)
+  const authFails = async (p) => { try { await p; return false } catch (e) { return e.name === 'OperationError' } }
+  ok('a recording does not authenticate as a message', await authFails(rawOpen(proofKeyA, down.headers.get('X-Proof-IV'), downBytes, '')))
+  ok('a message does not authenticate as a recording', await authFails(rawOpen(proofKeyA, msg.iv, Buffer.from(msg.ciphertext, 'base64'), '|proof')))
+  ok('each does authenticate as itself', (await rawOpen(proofKeyA, msg.iv, Buffer.from(msg.ciphertext, 'base64'), '')).byteLength > 0
+     && (await rawOpen(proofKeyA, down.headers.get('X-Proof-IV'), downBytes, '|proof')).byteLength > 0)
+  ok('the asker decides after watching', (await api('POST', `/api/session/${code}/room/video`, A.token, { action: 'confirm' })).status === 200)
 
   // A sends everything at once; B reads it.
   const sealed = await RC.encryptItem(keyA, code, A.slot, { ...SECRETS, junk: 'dropped' })

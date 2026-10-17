@@ -70,7 +70,7 @@ rollback() {
   warn "rolling back to $backup"
   systemctl stop "$SERVICE" || true
   rsync -a --delete \
-        --exclude venv/ --exclude db.sqlite --exclude 'db.sqlite-*' --exclude ca/ \
+        --exclude venv/ --exclude db.sqlite --exclude 'db.sqlite-*' --exclude ca/ --exclude proofs/ \
         "$backup/code/" "$APP_DIR/"
   if [ "$WITH_DB" = 1 ] && [ -f "$backup/db.sqlite" ]; then
     warn "restoring the database snapshot: changes made since then are lost"
@@ -146,7 +146,7 @@ if [ -d "$APP_DIR" ]; then
   # The CA is deliberately not copied here: a deploy never touches it, and a
   # plaintext key in every backup directory is exactly what the audit flagged.
   # deploy/backup.sh keeps encrypted copies of the CA and database.
-  run rsync -a --exclude venv/ --exclude ca/ "$APP_DIR/" "$BACKUP/code/"
+  run rsync -a --exclude venv/ --exclude ca/ --exclude proofs/ "$APP_DIR/" "$BACKUP/code/"
   if [ -f "$APP_DIR/db.sqlite" ]; then
     # .backup is consistent against a live writer; cp is not.
     run sqlite3 "$APP_DIR/db.sqlite" ".backup '$BACKUP/db.sqlite'" \
@@ -170,7 +170,7 @@ run mkdir -p "$APP_DIR"
 run rsync -a --delete \
     --exclude venv/ \
     --exclude db.sqlite --exclude 'db.sqlite-*' \
-    --exclude ca/ \
+    --exclude ca/ --exclude proofs/ \
     --exclude .git/ --exclude __pycache__/ --exclude .pytest_cache/ \
     --exclude tests/ --exclude '.env*' \
     "$SRC/" "$APP_DIR/"

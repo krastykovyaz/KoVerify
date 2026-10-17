@@ -367,7 +367,7 @@ def test_the_page_never_writes_shared_data_with_innerhtml():
     assert "innerHTML" not in room and "insertAdjacentHTML" not in room
 
 
-# ── video verification ─────────────────────────────────────────────────
+# ── video verification: the other person records a proof, the asker judges it ──
 
 def video(room, who, action):
     return room.call(who, "post", "/video", json={"action": action})
@@ -377,6 +377,18 @@ def video_view(room, who):
     return room.call(who, "get").get_json()["video"]
 
 
+def upload(room, who, data=None, iv=None, **kw):
+    data = data if data is not None else os.urandom(4000)
+    return room.client[who].post(
+        f"/api/session/{room.code}/room/video/proof", data=data,
+        headers={"X-Room-Token": room.token[who], "X-Proof-IV": iv or b64(os.urandom(12)),
+                 "Content-Type": "application/octet-stream", **kw.pop("headers", {})}, **kw)
+
+
+def fetch_proof(room, who):
+    return room.call(who, "get", "/video/proof")
+
+
 def age_video(cfg, code, seconds):
     conn = db(cfg)
     conn.execute("UPDATE sessions SET video_at=? WHERE code=?",
@@ -384,14 +396,20 @@ def age_video(cfg, code, seconds):
     conn.commit()
 
 
+def proof_file(cfg, code):
+    return os.path.join(cfg.proofs_dir, f"{code}.bin")
+
+
 def test_a_request_needs_both_people_verified_and_ready(app, cfg, admin):
     r = Room(app, cfg, admin)
     r.verify("alice")
     assert video(r, "alice", "request").status_code == 409          # bob has not verified
     r.verify("bob")
-    r.publish("alice")
-    assert video(r, "alice", "request").status_code == 409          # bob has no key yet
-    r.publish("bob")
+    alice_key, bob_key = public_key(), public_key()
+    r.commit("alice", alice_key); r.commit("bob", bob_key)
+    assert video(r, "alice", "request").status_code == 409          # committed, but no keys revealed yet
+    r.call("alice", "post", "/key", json={"public_key": alice_key})
+    r.call("bob", "post", "/key", json={"public_key": bob_key})
     assert video(r, "alice", "request").status_code == 200
 
 
@@ -403,124 +421,218 @@ def test_a_request_is_visible_to_both_sides_with_the_asker_named(ready):
         assert view["state"] == "requested" and view["by"] == ready.slot["alice"]
 
 
-def test_only_the_other_person_can_accept_or_decline(ready):
+def test_the_other_person_can_decline_and_the_asker_can_cancel(ready):
     video(ready, "alice", "request")
-    assert video(ready, "alice", "accept").status_code == 409        # cannot answer yourself
-    assert video(ready, "alice", "decline").status_code == 409
+    assert video(ready, "alice", "decline").status_code == 409       # cannot answer yourself
     assert video(ready, "bob", "cancel").status_code == 409          # only the asker cancels
-    assert video(ready, "bob", "confirm").status_code == 409         # nothing to confirm yet
-    assert video(ready, "bob", "accept").get_json()["video"]["state"] == "active"
-    assert video_view(ready, "alice")["state"] == "active"
+    assert video(ready, "bob", "decline").get_json()["video"]["state"] == "declined"
+    assert video(ready, "alice", "request").status_code == 200
+    assert video(ready, "alice", "cancel").status_code == 200
+    assert video_view(ready, "bob") is None
 
 
-def test_only_the_asker_decides_the_outcome_and_only_after_the_call_starts(ready):
+def test_only_the_person_asked_can_upload_and_only_while_a_request_stands(ready, cfg):
+    assert upload(ready, "bob").status_code == 409                   # nothing was asked
     video(ready, "alice", "request")
-    assert video(ready, "alice", "confirm").status_code == 409       # not active yet
-    video(ready, "bob", "accept")
-    assert video(ready, "bob", "confirm").status_code == 409         # the verified person cannot self-confirm
+    assert upload(ready, "alice").status_code == 409                 # the asker cannot answer for them
+    assert upload(ready, "bob").status_code == 200
+    assert video_view(ready, "alice")["state"] == "recorded"
+    assert os.path.exists(proof_file(cfg, ready.code))
+
+
+def test_the_proof_is_stored_privately_and_never_in_the_database(ready, cfg):
+    video(ready, "alice", "request")
+    payload = os.urandom(5000)
+    upload(ready, "bob", data=payload)
+    mode = os.stat(proof_file(cfg, ready.code)).st_mode & 0o777
+    assert mode == 0o600 and os.stat(cfg.proofs_dir).st_mode & 0o777 == 0o700
+    assert open(proof_file(cfg, ready.code), "rb").read() == payload
+    dump = "\n".join(db(cfg).iterdump())
+    assert b64(payload) not in dump and payload.hex() not in dump
+
+
+def test_both_people_fetch_the_same_ciphertext_and_nobody_else(ready):
+    video(ready, "alice", "request")
+    payload = os.urandom(3000)
+    iv = b64(os.urandom(12))
+    upload(ready, "bob", data=payload, iv=iv)
+    for who in ("alice", "bob"):
+        got = fetch_proof(ready, who)
+        assert got.status_code == 200 and got.data == payload
+        assert got.headers["X-Proof-IV"] == iv and "no-store" in got.headers["Cache-Control"]
+        assert got.headers["X-Proof-From"] == ready.slot["bob"]
+    assert ready.call("alice", "get", "/video/proof", headers={}).status_code == 401
+    assert ready.call("alice", "get", "/video/proof", headers={"X-Room-Token": "x" * 43}).status_code == 401
+
+
+def test_there_is_nothing_to_fetch_before_a_recording(ready):
+    assert fetch_proof(ready, "alice").status_code == 404
+    video(ready, "alice", "request")
+    assert fetch_proof(ready, "alice").status_code == 404
+
+
+@pytest.mark.parametrize("kwargs, status", [
+    ({"iv": "AAAA"}, 400), ({"iv": "***"}, 400), ({"data": b""}, 400), ({"data": b"x" * 16}, 400),
+])
+def test_malformed_uploads_are_rejected(ready, kwargs, status):
+    video(ready, "alice", "request")
+    assert upload(ready, "bob", **kwargs).status_code == status
+    assert video_view(ready, "alice")["state"] == "requested"
+
+
+def test_an_oversized_recording_is_refused_without_being_stored(app, cfg, admin, tmp_path):
+    from conftest import make_config
+    small = make_config(tmp_path / "small", PROOF_MAX_MB=1)
+    (tmp_path / "small").mkdir(exist_ok=True)
+    generate_ca(small)
+    app2 = create_app(small, testing=True)
+    adm = app2.test_client(); adm.post("/admin/login", data={"password": "test-admin-password-1234"})
+    r = Room(app2, small, adm); r.verify("alice"); r.verify("bob")
+    r.publish("alice"); r.publish("bob")
+    video(r, "alice", "request")
+    assert upload(r, "bob", data=os.urandom(1024 * 1024 + 4096)).status_code in (400, 413)
+    assert not os.path.exists(proof_file(small, r.code))
+    assert video_view(r, "alice")["state"] == "requested"
+
+
+def test_a_large_recording_within_the_limit_is_accepted(ready, cfg):
+    video(ready, "alice", "request")
+    payload = os.urandom(5 * 1024 * 1024)
+    assert upload(ready, "bob", data=payload).status_code == 200
+    assert fetch_proof(ready, "alice").data == payload
+
+
+def test_other_endpoints_keep_the_small_body_limit(ready):
+    big = {"iv": b64(os.urandom(12)), "ciphertext": b64(os.urandom(2 * 1024 * 1024))}
+    assert ready.call("alice", "post", "/items", json=big).status_code == 413
+
+
+def test_the_person_may_record_again_before_they_are_judged(ready, cfg):
+    video(ready, "alice", "request")
+    upload(ready, "bob", data=b"first" * 100)
+    second = os.urandom(2500)
+    assert upload(ready, "bob", data=second).status_code == 200
+    assert fetch_proof(ready, "alice").data == second
+    assert len(os.listdir(cfg.proofs_dir)) == 1
+
+
+def test_only_the_asker_judges_and_only_a_recording(ready):
+    video(ready, "alice", "request")
+    assert video(ready, "alice", "confirm").status_code == 409       # nothing recorded yet
+    upload(ready, "bob")
+    assert video(ready, "bob", "confirm").status_code == 409         # you cannot vouch for yourself
     assert video(ready, "bob", "deny").status_code == 409
     assert video(ready, "alice", "confirm").get_json()["video"]["state"] == "confirmed"
-    assert video_view(ready, "bob")["state"] == "confirmed"
     assert video(ready, "alice", "deny").status_code == 409          # already decided
+    assert video_view(ready, "bob")["state"] == "confirmed"
 
 
-def test_a_denial_is_recorded_for_both(ready):
-    video(ready, "alice", "request"); video(ready, "bob", "accept")
+def test_a_denial_is_recorded_for_both_and_the_recording_stays_viewable(ready):
+    video(ready, "alice", "request"); upload(ready, "bob")
     video(ready, "alice", "deny")
     assert video_view(ready, "alice")["state"] == video_view(ready, "bob")["state"] == "denied"
+    assert fetch_proof(ready, "alice").status_code == 200
 
 
-def test_declining_is_recorded_and_either_side_may_ask_again(ready):
-    video(ready, "alice", "request")
-    assert video(ready, "bob", "decline").get_json()["video"]["state"] == "declined"
+def test_the_recording_cannot_be_replaced_after_it_was_judged(ready):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    video(ready, "alice", "confirm")
+    assert upload(ready, "bob").status_code == 409
+
+
+def test_asking_again_deletes_the_previous_recording(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob"); video(ready, "alice", "confirm")
+    assert os.path.exists(proof_file(cfg, ready.code))
     assert video(ready, "bob", "request").status_code == 200         # roles swap
-    view = video_view(ready, "alice")
-    assert view["state"] == "requested" and view["by"] == ready.slot["bob"]
-    assert video(ready, "alice", "accept").status_code == 200
-
-
-def test_asking_again_after_any_result_is_allowed(ready):
-    for finish in ("confirm", "deny"):
-        assert video(ready, "alice", "request").status_code == 200
-        video(ready, "bob", "accept"); video(ready, "alice", finish)
-        assert video(ready, "alice", "request").status_code == 200
-        video(ready, "alice", "cancel")
+    assert not os.path.exists(proof_file(cfg, ready.code))
+    assert fetch_proof(ready, "alice").status_code == 404
 
 
 def test_a_live_exchange_cannot_be_replaced(ready):
     assert video(ready, "alice", "request").status_code == 200
-    assert video(ready, "alice", "request").status_code == 409       # duplicate
-    assert video(ready, "bob", "request").status_code == 409         # bob answers, he does not start another
-    video(ready, "bob", "accept")
-    assert video(ready, "bob", "request").status_code == 409         # a call is in progress
-
-
-def test_the_asker_can_cancel_a_pending_request(ready):
-    video(ready, "alice", "request")
-    assert video(ready, "alice", "cancel").status_code == 200
-    assert video_view(ready, "bob") is None
-    assert video(ready, "bob", "accept").status_code == 409
+    assert video(ready, "alice", "request").status_code == 409
+    assert video(ready, "bob", "request").status_code == 409
+    upload(ready, "bob")
+    assert video(ready, "bob", "request").status_code == 409         # a recording awaits judgement
 
 
 def test_an_unanswered_request_lapses(ready, cfg):
     video(ready, "alice", "request")
     age_video(cfg, ready.code, 121)
     assert video_view(ready, "bob") is None
-    assert video(ready, "bob", "accept").status_code == 409          # too late
-    assert video(ready, "bob", "request").status_code == 200         # and the slot is free again
+    assert upload(ready, "bob").status_code == 409                   # too late
+    assert video(ready, "bob", "request").status_code == 200
 
 
-def test_a_call_that_is_never_closed_out_lapses(ready, cfg):
-    video(ready, "alice", "request"); video(ready, "bob", "accept")
+def test_a_recording_nobody_judges_lapses(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
     age_video(cfg, ready.code, 31 * 60)
     assert video_view(ready, "alice") is None
     assert video(ready, "alice", "confirm").status_code == 409
+    assert fetch_proof(ready, "alice").status_code == 404
 
 
 def test_video_actions_need_a_seat_token_and_a_known_action(ready):
     assert video(ready, "alice", "teleport").status_code == 400
+    assert video(ready, "alice", "accept").status_code == 400        # the live-call step no longer exists
     assert ready.call("alice", "post", "/video", json={}).status_code == 400
     assert ready.call("alice", "post", "/video", headers={}, json={"action": "request"}).status_code == 401
-    assert ready.call("alice", "post", "/video", headers={"X-Room-Token": "x" * 43},
-                      json={"action": "request"}).status_code == 401
+    assert upload(ready, "alice", headers={"X-Room-Token": "x" * 43}).status_code == 401
 
 
 def test_video_state_is_not_exposed_on_the_public_status(ready):
-    video(ready, "alice", "request")
+    video(ready, "alice", "request"); upload(ready, "bob")
     body = ready.client["bob"].get(f"/api/session/{ready.code}/status").get_data(as_text=True)
-    assert "video" not in body and "requested" not in body
+    assert "video" not in body and "proof" not in body and "recorded" not in body
 
 
 def test_expired_rooms_refuse_video_actions(ready, cfg):
     expire(cfg, ready.code)
     assert video(ready, "alice", "request").status_code == 410
+    assert upload(ready, "bob").status_code == 410
 
 
-def test_the_state_carries_the_call_link_template(ready):
-    assert ready.call("alice", "get").get_json()["video_url_template"] == "https://meet.jit.si/{room}"
+def test_closing_the_room_deletes_the_recording(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    ready.call("alice", "post", "/close")
+    assert not os.path.exists(proof_file(cfg, ready.code))
+    row = session_row(cfg, ready.code)
+    assert row["proof_iv"] is None and row["proof_size"] is None and row["video_state"] is None
 
 
-@pytest.mark.parametrize("template", [
-    "http://meet.example/{room}", "https://meet.example/", "https://meet.example/{room}/{room}",
-    "https://meet.example/ {room}", 'https://meet.example/"{room}"', "javascript:alert({room})",
-    "https://meet.example/<{room}>",
-])
-def test_an_unsafe_call_link_template_is_refused_at_startup(tmp_path, template):
-    from verifier.config import ConfigError
-    with pytest.raises(ConfigError, match="VIDEO_URL_TEMPLATE"):
-        make_config(tmp_path, VIDEO_URL_TEMPLATE=template)
+def test_an_expired_room_loses_its_recording_on_first_contact(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    expire(cfg, ready.code)
+    assert ready.call("bob", "get").status_code == 410
+    assert not os.path.exists(proof_file(cfg, ready.code))
 
 
-def test_a_self_hosted_call_link_template_is_accepted_and_served(tmp_path):
-    cfg = make_config(tmp_path, VIDEO_URL_TEMPLATE="https://video.example.org/{room}")
-    generate_ca(cfg)
-    app = create_app(cfg, testing=True)
-    admin = app.test_client(); admin.post("/admin/login", data={"password": "test-admin-password-1234"})
-    r = Room(app, cfg, admin); r.verify("alice")
-    assert r.call("alice", "get").get_json()["video_url_template"] == "https://video.example.org/{room}"
+def test_the_cleanup_job_removes_recordings_of_ended_and_unknown_rooms(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    stray = proof_file(cfg, "GONE2345")
+    open(stray, "wb").write(b"orphan")
+    conn = connect(cfg.db_path)
+    purge_expired(conn, 300, cfg.proofs_dir); conn.commit()
+    assert os.path.exists(proof_file(cfg, ready.code)), "a live room's recording must survive"
+    assert not os.path.exists(stray), "a file for a room that does not exist must go"
+    expire(cfg, ready.code)
+    purge_expired(conn, 300, cfg.proofs_dir); conn.commit(); conn.close()
+    assert os.listdir(cfg.proofs_dir) == []
 
 
-def test_existing_databases_gain_the_video_columns(tmp_path):
+def test_the_proofs_directory_is_created_private(cfg, app):
+    assert os.path.isdir(cfg.proofs_dir) and os.stat(cfg.proofs_dir).st_mode & 0o777 == 0o700
+
+
+def test_the_recording_size_limit_is_configurable():
+    from pathlib import Path
+    import tempfile
+    base = Path(tempfile.mkdtemp())
+    assert make_config(base).proof_max_bytes == 12 * 1024 * 1024
+    assert make_config(base, PROOF_MAX_MB=3).proof_max_bytes == 3 * 1024 * 1024
+
+
+def test_existing_databases_gain_the_video_and_proof_columns(tmp_path):
     from verifier.db import init_db
     path = tmp_path / "old.sqlite"
     conn = sqlite3.connect(path)
@@ -530,13 +642,13 @@ def test_existing_databases_gain_the_video_columns(tmp_path):
     conn.commit(); conn.close()
     init_db(str(path))
     cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
-    assert {"video_state", "video_by", "video_at"} <= cols
+    assert {"video_state", "video_by", "video_at", "proof_iv", "proof_size", "proof_at"} <= cols
 
 
 # ── closing a room deletes everything in it ────────────────────────────
 
 SCRUBBED = ("user_a", "user_b", "a_name", "b_name", "a_method", "b_method", "a_seen_at", "b_seen_at",
-            "a_commit", "b_commit",
+            "a_commit", "b_commit", "proof_iv", "proof_size", "proof_at",
             "a_token_hash", "b_token_hash", "a_pub", "b_pub",
             "video_state", "video_by", "video_at")
 

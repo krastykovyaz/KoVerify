@@ -3,6 +3,7 @@
 Every connection opened here is closed when the request context tears down,
 which is what stops the file-descriptor leak the previous implementation had.
 """
+import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 
@@ -41,6 +42,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     video_state TEXT,
     video_by    TEXT,
     video_at    TEXT,
+    proof_iv    TEXT,
+    proof_size  INTEGER,
+    proof_at    TEXT,
     closed_at   TEXT,
     a_seen_at   TEXT,
     b_seen_at   TEXT
@@ -136,6 +140,9 @@ _ADDED_COLUMNS = (
     ("sessions", "b_seen_at", "TEXT"),
     ("sessions", "a_commit", "TEXT"),
     ("sessions", "b_commit", "TEXT"),
+    ("sessions", "proof_iv", "TEXT"),
+    ("sessions", "proof_size", "INTEGER"),
+    ("sessions", "proof_at", "TEXT"),
 )
 
 
@@ -175,12 +182,26 @@ _SCRUB = (
     "a_method=NULL, b_method=NULL, a_token_hash=NULL, b_token_hash=NULL, "
     "a_pub=NULL, b_pub=NULL, a_commit=NULL, b_commit=NULL, "
     "video_state=NULL, video_by=NULL, video_at=NULL, "
+    "proof_iv=NULL, proof_size=NULL, proof_at=NULL, "
     "a_seen_at=NULL, b_seen_at=NULL"
 )
 
 
-def close_room(conn, code):
+def proof_path(proofs_dir, code):
+    return os.path.join(proofs_dir, f"{code}.bin")
+
+
+def delete_proof(proofs_dir, code):
+    try:
+        os.unlink(proof_path(proofs_dir, code))
+    except FileNotFoundError:
+        pass
+
+
+def close_room(conn, code, proofs_dir=None):
     """Delete everything in a room. Safe to call twice."""
+    if proofs_dir:
+        delete_proof(proofs_dir, code)
     conn.execute("DELETE FROM room_items WHERE code=?", (code,))
     conn.execute(
         f"UPDATE sessions SET {_SCRUB}, closed_at=COALESCE(closed_at, ?) WHERE code=?",
@@ -188,9 +209,18 @@ def close_room(conn, code):
     )
 
 
-def purge_expired(conn, nonce_ttl_seconds):
+def purge_expired(conn, nonce_ttl_seconds, proofs_dir=None):
     """Delete rows that are past their useful life. Keeps the tables bounded."""
     now = utcnow()
+    if proofs_dir and os.path.isdir(proofs_dir):
+        # A proof file may only exist for a room that is open. Anything else is
+        # a leftover from a crash between the two steps of closing.
+        live = {r[0] for r in conn.execute(
+            "SELECT code FROM sessions WHERE closed_at IS NULL AND expires_at >= ?",
+            (now.isoformat(),))}
+        for name in os.listdir(proofs_dir):
+            if name.endswith(".bin") and name[:-4] not in live:
+                delete_proof(proofs_dir, name[:-4])
     conn.execute(
         "DELETE FROM nonces WHERE created_at < ?",
         ((now - timedelta(seconds=nonce_ttl_seconds)).isoformat(),),
