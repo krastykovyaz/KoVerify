@@ -1,0 +1,6 @@
+[Unit]
+Description=Encrypted backup of the verifier database and CA
+
+[Service]
+Type=oneshot
+ExecStart=/var/www/verifier/deploy/backup.sh

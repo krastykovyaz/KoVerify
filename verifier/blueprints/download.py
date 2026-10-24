@@ -70,7 +70,7 @@ def download_page(token):
     )
 
 
-def _deliver(token, builder, mimetype, suffix):
+def _deliver(token, builder, mimetype, suffix, as_attachment=True):
     """Shared delivery path for every credential artifact.
 
     Both artifacts carry the same private key, so both spend the same one-time
@@ -92,10 +92,15 @@ def _deliver(token, builder, mimetype, suffix):
         return "Ссылка недействительна или уже использована", 410
 
     payload = builder(row)
+    # Delivered: the server no longer needs to hold the user's private key. A
+    # transfer that fails is recovered by reissuing, not by keeping it around.
+    conn = get_db()
+    conn.execute("UPDATE users SET p12_b64=NULL WHERE id=?", (row["user_id"],))
+    conn.commit()
     buffer = io.BytesIO(payload)
     buffer.seek(0)
     response = send_file(
-        buffer, mimetype=mimetype, as_attachment=True,
+        buffer, mimetype=mimetype, as_attachment=as_attachment,
         download_name=f"{row['user_id']}-verifier{suffix}",
     )
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -114,10 +119,14 @@ def download_p12(token):
 
 @bp.route("/<token>/mobileconfig")
 def download_mobileconfig(token):
+    # iOS Safari only offers the "Profile Downloaded" install prompt when a
+    # .mobileconfig is served inline; as an attachment it just lands in Files
+    # with no prompt, which looks like the button silently did nothing.
     return _deliver(
         token,
         lambda row: build_mobileconfig(
             row["name"], row["user_id"], row["p12_b64"]).encode(),
         "application/x-apple-aspen-config",
         ".mobileconfig",
+        as_attachment=False,
     )

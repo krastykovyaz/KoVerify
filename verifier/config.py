@@ -67,12 +67,21 @@ class Config:
         self.download_ttl_hours = int(env.get("DOWNLOAD_TTL_HOURS", "24"))
         self.nonce_ttl_seconds = int(env.get("NONCE_TTL_SECONDS", "300"))
         self.cert_valid_days = int(env.get("CERT_VALID_DAYS", "730"))
+        # How long an admin login stays good, enforced server-side.
+        self.admin_session_minutes = int(env.get("ADMIN_SESSION_MINUTES", "60"))
 
         # Rate limits: (max attempts, window seconds).
         self.rl_admin_login = (int(env.get("RL_ADMIN_LOGIN_MAX", "5")), 900)
         self.rl_totp = (int(env.get("RL_TOTP_MAX", "10")), 300)
         self.rl_mtls = (int(env.get("RL_MTLS_MAX", "20")), 300)
         self.rl_status = (int(env.get("RL_STATUS_MAX", "300")), 60)
+        # Per client and room: a page polls every 3 s, so 20 a minute each.
+        self.rl_room = (int(env.get("RL_ROOM_MAX", "240")), 60)
+
+        # A video proof is recorded in the browser, encrypted there, and stored
+        # as one file per room until the room closes. Ciphertext bytes.
+        self.proof_max_bytes = int(env.get("PROOF_MAX_MB", "12")) * 1024 * 1024
+        self.proofs_dir = env.get("PROOFS_DIR", os.path.join(base, "proofs"))
 
         self._validate()
 

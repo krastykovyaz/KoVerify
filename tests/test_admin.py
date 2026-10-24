@@ -98,6 +98,14 @@ def test_init_ca_refuses_to_overwrite_an_existing_ca(admin):
     assert body["ok"] is False
 
 
+def test_download_link_in_admin_panel_is_a_real_link(admin):
+    """The one-time download URL was a plain <div>, not clickable; an
+    operator reading it off a phone had to select and copy it by hand."""
+    body = admin.get("/admin").get_data(as_text=True)
+    assert '<a href="#" target="_blank"' in body
+    assert 'id="modal-download-url"' in body
+
+
 def test_security_headers_are_present(client):
     headers = client.get("/").headers
     assert headers["X-Content-Type-Options"] == "nosniff"

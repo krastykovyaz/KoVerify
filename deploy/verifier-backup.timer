@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily encrypted verifier backup
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

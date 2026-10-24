@@ -305,7 +305,7 @@
     </p>
     <div class="secret-row">
       <span id="totp-secret">{{ totp_secret }}</span>
-      <button onclick="copySecret()">копировать</button>
+      <button onclick="copySecret(this)">копировать</button>
     </div>
   </div>
 
@@ -338,11 +338,11 @@
   // Автоматически показываем нужную платформу
   switchPlatform(detectPlatform())
 
-  function copySecret() {
+  function copySecret(button) {
     const text = document.getElementById('totp-secret').textContent
     navigator.clipboard.writeText(text)
-    event.target.textContent = '✓'
-    setTimeout(() => event.target.textContent = 'копировать', 1500)
+    button.textContent = '✓'
+    setTimeout(() => button.textContent = 'копировать', 1500)
   }
 </script>
 </body>

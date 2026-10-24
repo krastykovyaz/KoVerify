@@ -14,6 +14,20 @@ from verifier import create_app                      # noqa: E402
 from verifier.ca import generate_ca                  # noqa: E402
 from verifier.config import Config                   # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _small_rsa_keys_under_test(monkeypatch):
+    """Almost every test builds its own CA, and 4096-bit key generation made
+    the suite take minutes, which matters because deploy.sh runs it as a gate.
+    Nothing the tests check depends on the key size."""
+    import verifier.ca as ca_module
+    real = ca_module.rsa.generate_private_key
+
+    def small(public_exponent, key_size, *args, **kwargs):
+        return real(public_exponent=public_exponent, key_size=min(key_size, 2048), *args, **kwargs)
+
+    monkeypatch.setattr(ca_module.rsa, "generate_private_key", small)
+
+
 ADMIN_PASSWORD = "test-admin-password-1234"
 PROXY_SECRET = "test-proxy-shared-secret-value"
 

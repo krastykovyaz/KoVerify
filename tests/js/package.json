@@ -1,0 +1,6 @@
+{
+  "name": "verifier-page-tests",
+  "private": true,
+  "description": "Browser-level tests for the room pages. Run `npm install` here to enable tests/test_room_ui.py.",
+  "devDependencies": { "jsdom": "^26.0.0" }
+}

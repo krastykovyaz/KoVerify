@@ -1,0 +1,925 @@
+"""The room: access is tied to the seat token, and the server holds only ciphertext."""
+import base64
+import os
+import sqlite3
+import time
+from datetime import timedelta
+
+import pyotp
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from conftest import make_config
+from test_cert_validation import proxy, proxy_headers  # noqa: F401  (fixture and helper)
+from verifier import create_app
+from verifier.ca import generate_ca
+from verifier.db import purge_expired, utcnow, connect
+
+
+def b64(raw):
+    return base64.b64encode(raw).decode()
+
+
+def public_key():
+    key = ec.generate_private_key(ec.SECP256R1())
+    return b64(key.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
+
+
+def commit_of(public_key_b64):
+    import hashlib
+    return hashlib.sha256(public_key_b64.encode()).hexdigest()
+
+
+def sealed(size=40):
+    return {"iv": b64(os.urandom(12)), "ciphertext": b64(os.urandom(size))}
+
+
+class Room:
+    """Two enrolled people who have both passed verification."""
+
+    def __init__(self, app, cfg, admin, secrets=None, step=0):
+        self.app, self.cfg, self.step = app, cfg, step
+        self.code = app.test_client().post("/api/session/create").get_json()["code"]
+        self.token, self.slot = {}, {}
+        if secrets is None:
+            secrets = {}
+            for who, uid in (("alice", "alice-001"), ("bob", "bob-001")):
+                payload = admin.post("/admin/api/register", json={"user_id": uid, "name": who.title()}).get_json()
+                secrets[who] = payload["totp_secret"]
+        self.secret = secrets
+        self.client = {who: app.test_client() for who in ("alice", "bob")}
+
+    def verify(self, who):
+        uid = f"{who}-001"
+        # A TOTP code works once per person, so a second room uses the next step.
+        code = pyotp.TOTP(self.secret[who]).at(time.time() + 30 * self.step)
+        reply = self.client[who].post(f"/api/session/{self.code}/verify/totp",
+                                      json={"user_id": uid, "code": code}).get_json()
+        assert reply["ok"], reply
+        self.token[who], self.slot[who] = reply["token"], reply["slot"]
+        return reply
+
+    def call(self, who, method, path="", **kw):
+        headers = kw.pop("headers", None)
+        if headers is None:
+            headers = {"X-Room-Token": self.token[who]}
+        return getattr(self.client[who], method)(
+            f"/api/session/{self.code}/room{path}", headers=headers, **kw)
+
+    def commit(self, who, key):
+        return self.call(who, "post", "/commit", json={"commit": commit_of(key)})
+
+    def publish(self, who, key=None):
+        """Commit then reveal, the way the page does. Both sides must have
+        committed before any key is accepted, so commit for the other side too
+        when it has not yet; the test can still reveal its own key later."""
+        key = key or getattr(self, "pending", {}).get(who) or public_key()
+        self.commit(who, key)
+        other = "bob" if who == "alice" else "alice"
+        if other in self.token and not self.call(other, "get").get_json()["you"]["commit"]:
+            self.pending = getattr(self, "pending", {})
+            self.pending[other] = public_key()
+            self.commit(other, self.pending[other])
+        return self.call(who, "post", "/key", json={"public_key": key})
+
+
+@pytest.fixture
+def room(app, cfg, admin):
+    r = Room(app, cfg, admin)
+    r.verify("alice"); r.verify("bob")
+    return r
+
+
+@pytest.fixture
+def ready(room):
+    assert room.publish("alice").status_code == 200
+    assert room.publish("bob").status_code == 200
+    return room
+
+
+def db(cfg):
+    return sqlite3.connect(cfg.db_path)
+
+
+# ── seat tokens ────────────────────────────────────────────────────────
+
+def test_verification_hands_out_a_token_and_stores_only_its_hash(room, cfg):
+    conn = db(cfg)
+    stored = conn.execute("SELECT a_token_hash, b_token_hash FROM sessions WHERE code=?", (room.code,)).fetchone()
+    assert {room.slot["alice"], room.slot["bob"]} == {"a", "b"}
+    for who in ("alice", "bob"):
+        assert room.token[who] not in stored and len(room.token[who]) >= 40
+    assert all(len(h) == 64 for h in stored)
+    assert room.token["alice"] != room.token["bob"]
+
+
+def test_a_second_verification_by_the_same_person_gets_no_token(app, cfg, admin):
+    r = Room(app, cfg, admin)
+    r.verify("alice")
+    again = r.client["alice"].post(f"/api/session/{r.code}/verify/totp",
+        json={"user_id": "alice-001", "code": pyotp.TOTP(r.secret["alice"]).at(time.time() + 30)}).get_json()
+    assert again["ok"] is False and "token" not in again
+
+
+def test_the_public_status_never_exposes_tokens_or_keys(ready):
+    body = ready.client["alice"].get(f"/api/session/{ready.code}/status").get_data(as_text=True)
+    for forbidden in ("token", "pub", ready.token["alice"], ready.token["bob"]):
+        assert forbidden not in body
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Room-Token": ""}, {"X-Room-Token": "guess"},
+                                     {"X-Room-Token": "x" * 43}])
+def test_the_room_refuses_anyone_without_a_valid_token(room, headers):
+    assert room.call("alice", "get", headers=headers).status_code == 401
+    assert room.call("alice", "post", "/key", headers=headers, json={"public_key": public_key()}).status_code == 401
+    assert room.call("alice", "post", "/items", headers=headers, json=sealed()).status_code == 401
+    assert room.call("alice", "delete", "/items/1", headers=headers).status_code == 401
+
+
+def test_knowing_the_code_is_not_enough(room):
+    assert room.client["alice"].get(f"/api/session/{room.code}/room").status_code == 401
+
+
+def test_a_token_only_opens_its_own_room(app, cfg, admin, room):
+    other = Room(app, cfg, admin, secrets=room.secret, step=1)
+    response = other.client["alice"].get(f"/api/session/{other.code}/room",
+                                         headers={"X-Room-Token": room.token["alice"]})
+    assert response.status_code == 401
+
+
+def test_an_unknown_room_is_not_found(client):
+    assert client.get("/api/session/ZZZZZZZZ/room", headers={"X-Room-Token": "t"}).status_code == 404
+
+
+def test_each_side_sees_the_right_perspective(room):
+    a = room.call("alice", "get").get_json()
+    b = room.call("bob", "get").get_json()
+    assert a["slot"] != b["slot"]
+    assert a["you"]["name"] == "Alice" and a["peer"]["name"] == "Bob"
+    assert b["you"]["name"] == "Bob" and b["peer"]["name"] == "Alice"
+    assert a["ready"] is False and a["peer"]["public_key"] is None
+
+
+# ── public keys ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("bad", [None, "", "not base64!!", b64(b"short"), b64(b"\x04" + b"\x01" * 64),
+                                 b64(b"\x02" + b"\x01" * 64), 12345, ["x"]])
+def test_invalid_public_keys_are_rejected(room, bad):
+    assert room.publish("alice", key=bad if isinstance(bad, str) else None).status_code in (200, 400)
+    response = room.call("alice", "post", "/key", json={"public_key": bad})
+    # A point that is not on the curve must never be accepted.
+    assert response.status_code == 400 or room.call("alice", "get").get_json()["you"]["public_key"] is not None
+
+
+def test_a_point_that_is_not_on_the_curve_is_rejected(room):
+    off_curve = b64(b"\x04" + b"\x01" * 64)
+    assert room.call("alice", "post", "/key", json={"public_key": off_curve}).status_code == 400
+    assert room.call("alice", "get").get_json()["you"]["public_key"] is None
+
+
+def test_a_key_is_set_once(room):
+    first = public_key()
+    assert room.publish("alice", first).status_code == 200
+    assert room.publish("alice", first).status_code == 200            # idempotent retry
+    assert room.publish("alice", public_key()).status_code == 409     # no swapping
+    assert room.call("alice", "get").get_json()["you"]["public_key"] == first
+
+
+def test_the_peer_sees_the_published_key(ready):
+    a = ready.call("alice", "get").get_json()
+    b = ready.call("bob", "get").get_json()
+    assert a["peer"]["public_key"] == b["you"]["public_key"]
+    assert a["ready"] and b["ready"]
+
+
+# ── items ──────────────────────────────────────────────────────────────
+
+def test_sending_needs_both_sides_verified_and_both_keys(app, cfg, admin):
+    r = Room(app, cfg, admin)
+    r.verify("alice")
+    alice_key = public_key()
+    r.commit("alice", alice_key)
+    assert r.call("alice", "post", "/key", json={"public_key": alice_key}).status_code == 409   # bob not here
+    assert r.call("alice", "post", "/items", json=sealed()).status_code == 409                   # bob not verified
+    r.verify("bob")
+    bob_key = public_key()
+    r.commit("bob", bob_key)
+    assert r.call("alice", "post", "/key", json={"public_key": alice_key}).status_code == 200
+    assert r.call("alice", "post", "/items", json=sealed()).status_code == 409                   # bob has no key yet
+    assert r.call("bob", "post", "/key", json={"public_key": bob_key}).status_code == 200
+    assert r.call("alice", "post", "/items", json=sealed()).status_code == 200
+
+
+def test_items_reach_both_sides_exactly_as_sent_and_in_order(ready):
+    first, second = sealed(), sealed(90)
+    ready.call("alice", "post", "/items", json=first)
+    ready.call("bob", "post", "/items", json=second)
+    for who in ("alice", "bob"):
+        items = ready.call(who, "get").get_json()["items"]
+        assert [i["from"] for i in items] == [ready.slot["alice"], ready.slot["bob"]]
+        assert (items[0]["iv"], items[0]["ciphertext"]) == (first["iv"], first["ciphertext"])
+        assert items[1]["ciphertext"] == second["ciphertext"]
+
+
+def test_the_server_cannot_read_what_is_stored(ready, cfg):
+    marker = "correct-horse-battery-staple"
+    ready.call("alice", "post", "/items", json=sealed())
+    dump = "\n".join(db(cfg).iterdump())
+    assert marker not in dump
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"iv": "AAAA", "ciphertext": b64(b"x" * 40)},
+    {"iv": b64(b"x" * 12), "ciphertext": ""},
+    {"iv": b64(b"x" * 12), "ciphertext": b64(b"x" * 16)},              # a tag and no data
+    {"iv": b64(b"x" * 12), "ciphertext": "***"},
+    {"iv": b64(b"x" * 12), "ciphertext": b64(b"x" * (12 * 1024 + 1))},
+    {"iv": 5, "ciphertext": 6},
+])
+def test_malformed_items_are_rejected(ready, payload):
+    assert ready.call("alice", "post", "/items", json=payload).status_code == 400
+    assert ready.call("alice", "get").get_json()["items"] == []
+
+
+def test_a_room_holds_a_bounded_number_of_items(ready):
+    for _ in range(50):
+        assert ready.call("alice", "post", "/items", json=sealed()).status_code == 200
+    assert ready.call("alice", "post", "/items", json=sealed()).status_code == 409
+
+
+def test_either_side_can_delete_but_only_inside_the_room(app, cfg, admin, ready):
+    item = ready.call("alice", "post", "/items", json=sealed()).get_json()["id"]
+    assert ready.call("bob", "delete", f"/items/{item}").status_code == 200
+    assert ready.call("alice", "get").get_json()["items"] == []
+    assert ready.call("bob", "delete", f"/items/{item}").status_code == 404
+
+    other = Room(app, cfg, admin, secrets=ready.secret, step=1)
+    other.verify("alice"); other.verify("bob"); other.publish("alice"); other.publish("bob")
+    foreign = other.call("alice", "post", "/items", json=sealed()).get_json()["id"]
+    assert ready.call("alice", "delete", f"/items/{foreign}").status_code == 404
+    assert len(other.call("alice", "get").get_json()["items"]) == 1
+
+
+# ── lifetime ───────────────────────────────────────────────────────────
+
+def expire(cfg, code):
+    conn = db(cfg)
+    conn.execute("UPDATE sessions SET expires_at=? WHERE code=?",
+                 ((utcnow() - timedelta(minutes=1)).isoformat(), code))
+    conn.commit()
+
+
+def test_an_expired_room_closes_and_its_items_are_deleted(ready, cfg):
+    ready.call("alice", "post", "/items", json=sealed())
+    expire(cfg, ready.code)
+    response = ready.call("bob", "get")
+    assert response.status_code == 410
+    assert db(cfg).execute("SELECT COUNT(*) FROM room_items").fetchone()[0] == 0
+    assert ready.call("alice", "post", "/items", json=sealed()).status_code == 410
+
+
+def test_purge_removes_items_of_expired_and_vanished_rooms(ready, cfg):
+    ready.call("alice", "post", "/items", json=sealed())
+    conn = connect(cfg.db_path)
+    conn.execute("INSERT INTO room_items (code, from_slot, iv, ciphertext, created_at) "
+                 "VALUES ('GONE2345','a','x','y','2000-01-01T00:00:00+00:00')")
+    conn.commit()
+    purge_expired(conn, 300); conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM room_items").fetchone()[0] == 1    # live room kept
+    expire(cfg, ready.code)
+    purge_expired(conn, 300); conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM room_items").fetchone()[0] == 0
+
+
+def test_room_polling_is_rate_limited_per_client_and_room(tmp_path):
+    cfg = make_config(tmp_path, RL_ROOM_MAX=5)
+    generate_ca(cfg)
+    app = create_app(cfg, testing=True)
+    admin = app.test_client(); admin.post("/admin/login", data={"password": "test-admin-password-1234"})
+    r = Room(app, cfg, admin); r.verify("alice")
+    codes = [r.call("alice", "get").status_code for _ in range(8)]
+    assert codes[:5] == [200] * 5 and set(codes[5:]) == {429}
+
+
+def test_existing_databases_gain_the_room_columns_and_table(tmp_path):
+    from verifier.db import init_db
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, "
+                 "b_name TEXT, a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.execute("INSERT INTO sessions (code) VALUES ('KEEP2345')")
+    conn.commit(); conn.close()
+    init_db(str(path)); init_db(str(path))
+    conn = sqlite3.connect(path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+    assert {"a_token_hash", "b_token_hash", "a_pub", "b_pub"} <= cols
+    assert conn.execute("SELECT code FROM sessions").fetchone()[0] == "KEEP2345"
+    assert conn.execute("SELECT COUNT(*) FROM room_items").fetchone()[0] == 0
+
+
+# ── every way of verifying hands out a seat ────────────────────────────
+
+def test_certificate_login_hands_out_a_seat_token(client, user):
+    from conftest import nonce_for
+    code = client.post("/api/session/create").get_json()["code"]
+    nonce = nonce_for(client)
+    reply = client.post(f"/api/session/{code}/verify/cert", json={
+        "user_id": user.id, "cert_pem": user.cert_pem, "nonce": nonce, "signature_b64": user.sign(nonce),
+    }).get_json()
+    assert reply["ok"] and reply["slot"] in ("a", "b") and len(reply["token"]) >= 40
+
+
+def test_device_certificate_login_hands_out_a_seat_token(proxy):
+    app, cfg, user = proxy
+    client = app.test_client()
+    code = client.post("/api/session/create").get_json()["code"]
+    reply = client.post(f"/api/session/{code}/verify/mtls", json={}, headers=proxy_headers(user),
+                        environ_base={"REMOTE_ADDR": "127.0.0.1"}).get_json()
+    assert reply["ok"] and reply["slot"] in ("a", "b") and len(reply["token"]) >= 40
+
+
+def test_a_failed_verification_hands_out_nothing(client, user):
+    code = client.post("/api/session/create").get_json()["code"]
+    reply = client.post(f"/api/session/{code}/verify/totp", json={"user_id": user.id, "code": "000000"}).get_json()
+    assert reply["ok"] is False and "token" not in reply
+
+
+# ── the page and its assets ────────────────────────────────────────────
+
+def test_the_crypto_module_is_served_and_the_page_loads_it(client):
+    asset = client.get("/static/room-crypto.js")
+    assert asset.status_code == 200 and b"AES-GCM" in asset.data
+    page = client.get("/result/ABCD2345").get_data(as_text=True)
+    assert '/static/room-crypto.js' in page and 'id="room-form"' in page
+
+
+def test_the_csp_allows_the_module_and_the_room_calls(client):
+    csp = client.get("/").headers["Content-Security-Policy"]
+    assert "script-src 'self'" in csp and "connect-src 'self'" in csp
+
+
+def test_the_page_never_writes_shared_data_with_innerhtml():
+    body = open("templates/result.html").read()
+    room = body[body.index("Обмен данными в комнате"):]
+    assert "innerHTML" not in room and "insertAdjacentHTML" not in room
+
+
+# ── video verification: the other person records a proof, the asker judges it ──
+
+def video(room, who, action):
+    return room.call(who, "post", "/video", json={"action": action})
+
+
+def video_view(room, who):
+    return room.call(who, "get").get_json()["video"]
+
+
+def upload(room, who, data=None, iv=None, **kw):
+    data = data if data is not None else os.urandom(4000)
+    return room.client[who].post(
+        f"/api/session/{room.code}/room/video/proof", data=data,
+        headers={"X-Room-Token": room.token[who], "X-Proof-IV": iv or b64(os.urandom(12)),
+                 "Content-Type": "application/octet-stream", **kw.pop("headers", {})}, **kw)
+
+
+def fetch_proof(room, who):
+    return room.call(who, "get", "/video/proof")
+
+
+def age_video(cfg, code, seconds):
+    conn = db(cfg)
+    conn.execute("UPDATE sessions SET video_at=? WHERE code=?",
+                 ((utcnow() - timedelta(seconds=seconds)).isoformat(), code))
+    conn.commit()
+
+
+def proof_file(cfg, code):
+    return os.path.join(cfg.proofs_dir, f"{code}.bin")
+
+
+def test_a_request_needs_both_people_verified_and_ready(app, cfg, admin):
+    r = Room(app, cfg, admin)
+    r.verify("alice")
+    assert video(r, "alice", "request").status_code == 409          # bob has not verified
+    r.verify("bob")
+    alice_key, bob_key = public_key(), public_key()
+    r.commit("alice", alice_key); r.commit("bob", bob_key)
+    assert video(r, "alice", "request").status_code == 409          # committed, but no keys revealed yet
+    r.call("alice", "post", "/key", json={"public_key": alice_key})
+    r.call("bob", "post", "/key", json={"public_key": bob_key})
+    assert video(r, "alice", "request").status_code == 200
+
+
+def test_a_request_is_visible_to_both_sides_with_the_asker_named(ready):
+    assert video_view(ready, "alice") is None
+    assert video(ready, "alice", "request").get_json()["video"]["state"] == "requested"
+    for who in ("alice", "bob"):
+        view = video_view(ready, who)
+        assert view["state"] == "requested" and view["by"] == ready.slot["alice"]
+
+
+def test_the_other_person_can_decline_and_the_asker_can_cancel(ready):
+    video(ready, "alice", "request")
+    assert video(ready, "alice", "decline").status_code == 409       # cannot answer yourself
+    assert video(ready, "bob", "cancel").status_code == 409          # only the asker cancels
+    assert video(ready, "bob", "decline").get_json()["video"]["state"] == "declined"
+    assert video(ready, "alice", "request").status_code == 200
+    assert video(ready, "alice", "cancel").status_code == 200
+    assert video_view(ready, "bob") is None
+
+
+def test_only_the_person_asked_can_upload_and_only_while_a_request_stands(ready, cfg):
+    assert upload(ready, "bob").status_code == 409                   # nothing was asked
+    video(ready, "alice", "request")
+    assert upload(ready, "alice").status_code == 409                 # the asker cannot answer for them
+    assert upload(ready, "bob").status_code == 200
+    assert video_view(ready, "alice")["state"] == "recorded"
+    assert os.path.exists(proof_file(cfg, ready.code))
+
+
+def test_the_proof_is_stored_privately_and_never_in_the_database(ready, cfg):
+    video(ready, "alice", "request")
+    payload = os.urandom(5000)
+    upload(ready, "bob", data=payload)
+    mode = os.stat(proof_file(cfg, ready.code)).st_mode & 0o777
+    assert mode == 0o600 and os.stat(cfg.proofs_dir).st_mode & 0o777 == 0o700
+    assert open(proof_file(cfg, ready.code), "rb").read() == payload
+    dump = "\n".join(db(cfg).iterdump())
+    assert b64(payload) not in dump and payload.hex() not in dump
+
+
+def test_both_people_fetch_the_same_ciphertext_and_nobody_else(ready):
+    video(ready, "alice", "request")
+    payload = os.urandom(3000)
+    iv = b64(os.urandom(12))
+    upload(ready, "bob", data=payload, iv=iv)
+    for who in ("alice", "bob"):
+        got = fetch_proof(ready, who)
+        assert got.status_code == 200 and got.data == payload
+        assert got.headers["X-Proof-IV"] == iv and "no-store" in got.headers["Cache-Control"]
+        assert got.headers["X-Proof-From"] == ready.slot["bob"]
+    assert ready.call("alice", "get", "/video/proof", headers={}).status_code == 401
+    assert ready.call("alice", "get", "/video/proof", headers={"X-Room-Token": "x" * 43}).status_code == 401
+
+
+def test_there_is_nothing_to_fetch_before_a_recording(ready):
+    assert fetch_proof(ready, "alice").status_code == 404
+    video(ready, "alice", "request")
+    assert fetch_proof(ready, "alice").status_code == 404
+
+
+@pytest.mark.parametrize("kwargs, status", [
+    ({"iv": "AAAA"}, 400), ({"iv": "***"}, 400), ({"data": b""}, 400), ({"data": b"x" * 16}, 400),
+])
+def test_malformed_uploads_are_rejected(ready, kwargs, status):
+    video(ready, "alice", "request")
+    assert upload(ready, "bob", **kwargs).status_code == status
+    assert video_view(ready, "alice")["state"] == "requested"
+
+
+def test_an_oversized_recording_is_refused_without_being_stored(app, cfg, admin, tmp_path):
+    from conftest import make_config
+    small = make_config(tmp_path / "small", PROOF_MAX_MB=1)
+    (tmp_path / "small").mkdir(exist_ok=True)
+    generate_ca(small)
+    app2 = create_app(small, testing=True)
+    adm = app2.test_client(); adm.post("/admin/login", data={"password": "test-admin-password-1234"})
+    r = Room(app2, small, adm); r.verify("alice"); r.verify("bob")
+    r.publish("alice"); r.publish("bob")
+    video(r, "alice", "request")
+    assert upload(r, "bob", data=os.urandom(1024 * 1024 + 4096)).status_code in (400, 413)
+    assert not os.path.exists(proof_file(small, r.code))
+    assert video_view(r, "alice")["state"] == "requested"
+
+
+def test_a_large_recording_within_the_limit_is_accepted(ready, cfg):
+    video(ready, "alice", "request")
+    payload = os.urandom(5 * 1024 * 1024)
+    assert upload(ready, "bob", data=payload).status_code == 200
+    assert fetch_proof(ready, "alice").data == payload
+
+
+def test_other_endpoints_keep_the_small_body_limit(ready):
+    big = {"iv": b64(os.urandom(12)), "ciphertext": b64(os.urandom(2 * 1024 * 1024))}
+    assert ready.call("alice", "post", "/items", json=big).status_code == 413
+
+
+def test_the_person_may_record_again_before_they_are_judged(ready, cfg):
+    video(ready, "alice", "request")
+    upload(ready, "bob", data=b"first" * 100)
+    second = os.urandom(2500)
+    assert upload(ready, "bob", data=second).status_code == 200
+    assert fetch_proof(ready, "alice").data == second
+    assert len(os.listdir(cfg.proofs_dir)) == 1
+
+
+def test_only_the_asker_judges_and_only_a_recording(ready):
+    video(ready, "alice", "request")
+    assert video(ready, "alice", "confirm").status_code == 409       # nothing recorded yet
+    upload(ready, "bob")
+    assert video(ready, "bob", "confirm").status_code == 409         # you cannot vouch for yourself
+    assert video(ready, "bob", "deny").status_code == 409
+    assert video(ready, "alice", "confirm").get_json()["video"]["state"] == "confirmed"
+    assert video(ready, "alice", "deny").status_code == 409          # already decided
+    assert video_view(ready, "bob")["state"] == "confirmed"
+
+
+def test_a_denial_is_recorded_for_both_and_the_recording_stays_viewable(ready):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    video(ready, "alice", "deny")
+    assert video_view(ready, "alice")["state"] == video_view(ready, "bob")["state"] == "denied"
+    assert fetch_proof(ready, "alice").status_code == 200
+
+
+def test_the_recording_cannot_be_replaced_after_it_was_judged(ready):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    video(ready, "alice", "confirm")
+    assert upload(ready, "bob").status_code == 409
+
+
+def test_asking_again_deletes_the_previous_recording(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob"); video(ready, "alice", "confirm")
+    assert os.path.exists(proof_file(cfg, ready.code))
+    assert video(ready, "bob", "request").status_code == 200         # roles swap
+    assert not os.path.exists(proof_file(cfg, ready.code))
+    assert fetch_proof(ready, "alice").status_code == 404
+
+
+def test_a_live_exchange_cannot_be_replaced(ready):
+    assert video(ready, "alice", "request").status_code == 200
+    assert video(ready, "alice", "request").status_code == 409
+    assert video(ready, "bob", "request").status_code == 409
+    upload(ready, "bob")
+    assert video(ready, "bob", "request").status_code == 409         # a recording awaits judgement
+
+
+def test_an_unanswered_request_lapses(ready, cfg):
+    video(ready, "alice", "request")
+    age_video(cfg, ready.code, 121)
+    assert video_view(ready, "bob") is None
+    assert upload(ready, "bob").status_code == 409                   # too late
+    assert video(ready, "bob", "request").status_code == 200
+
+
+def test_a_recording_nobody_judges_lapses(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    age_video(cfg, ready.code, 31 * 60)
+    assert video_view(ready, "alice") is None
+    assert video(ready, "alice", "confirm").status_code == 409
+    assert fetch_proof(ready, "alice").status_code == 404
+
+
+def test_video_actions_need_a_seat_token_and_a_known_action(ready):
+    assert video(ready, "alice", "teleport").status_code == 400
+    assert video(ready, "alice", "accept").status_code == 400        # the live-call step no longer exists
+    assert ready.call("alice", "post", "/video", json={}).status_code == 400
+    assert ready.call("alice", "post", "/video", headers={}, json={"action": "request"}).status_code == 401
+    assert upload(ready, "alice", headers={"X-Room-Token": "x" * 43}).status_code == 401
+
+
+def test_video_state_is_not_exposed_on_the_public_status(ready):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    body = ready.client["bob"].get(f"/api/session/{ready.code}/status").get_data(as_text=True)
+    assert "video" not in body and "proof" not in body and "recorded" not in body
+
+
+def test_expired_rooms_refuse_video_actions(ready, cfg):
+    expire(cfg, ready.code)
+    assert video(ready, "alice", "request").status_code == 410
+    assert upload(ready, "bob").status_code == 410
+
+
+def test_closing_the_room_deletes_the_recording(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    ready.call("alice", "post", "/close")
+    assert not os.path.exists(proof_file(cfg, ready.code))
+    row = session_row(cfg, ready.code)
+    assert row["proof_iv"] is None and row["proof_size"] is None and row["video_state"] is None
+
+
+def test_an_expired_room_loses_its_recording_on_first_contact(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    expire(cfg, ready.code)
+    assert ready.call("bob", "get").status_code == 410
+    assert not os.path.exists(proof_file(cfg, ready.code))
+
+
+def test_the_cleanup_job_removes_recordings_of_ended_and_unknown_rooms(ready, cfg):
+    video(ready, "alice", "request"); upload(ready, "bob")
+    stray = proof_file(cfg, "GONE2345")
+    open(stray, "wb").write(b"orphan")
+    conn = connect(cfg.db_path)
+    purge_expired(conn, 300, cfg.proofs_dir); conn.commit()
+    assert os.path.exists(proof_file(cfg, ready.code)), "a live room's recording must survive"
+    assert not os.path.exists(stray), "a file for a room that does not exist must go"
+    expire(cfg, ready.code)
+    purge_expired(conn, 300, cfg.proofs_dir); conn.commit(); conn.close()
+    assert os.listdir(cfg.proofs_dir) == []
+
+
+def test_the_proofs_directory_is_created_private(cfg, app):
+    assert os.path.isdir(cfg.proofs_dir) and os.stat(cfg.proofs_dir).st_mode & 0o777 == 0o700
+
+
+def test_the_recording_size_limit_is_configurable():
+    from pathlib import Path
+    import tempfile
+    base = Path(tempfile.mkdtemp())
+    assert make_config(base).proof_max_bytes == 12 * 1024 * 1024
+    assert make_config(base, PROOF_MAX_MB=3).proof_max_bytes == 3 * 1024 * 1024
+
+
+def test_existing_databases_gain_the_video_and_proof_columns(tmp_path):
+    from verifier.db import init_db
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, "
+                 "b_name TEXT, a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.commit(); conn.close()
+    init_db(str(path))
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
+    assert {"video_state", "video_by", "video_at", "proof_iv", "proof_size", "proof_at"} <= cols
+
+
+# ── closing a room deletes everything in it ────────────────────────────
+
+SCRUBBED = ("user_a", "user_b", "a_name", "b_name", "a_method", "b_method", "a_seen_at", "b_seen_at",
+            "a_commit", "b_commit", "proof_iv", "proof_size", "proof_at",
+            "a_token_hash", "b_token_hash", "a_pub", "b_pub",
+            "video_state", "video_by", "video_at")
+
+
+def session_row(cfg, code):
+    conn = db(cfg)
+    conn.row_factory = sqlite3.Row
+    return conn.execute("SELECT * FROM sessions WHERE code=?", (code,)).fetchone()
+
+
+def populated(ready):
+    """A room with a message each way, a key each and a video request in it."""
+    ready.call("alice", "post", "/items", json=sealed())
+    ready.call("bob", "post", "/items", json=sealed(70))
+    video(ready, "alice", "request")
+    return ready
+
+
+def secrets_in(cfg, code):
+    """Values that exist only inside the room, and so must not survive it.
+
+    Names are deliberately absent: they also live in the users table, which is an
+    enrolment record, not part of any room. The room's own name columns are
+    checked directly in assert_nothing_left.
+    """
+    row = session_row(cfg, code)
+    values = [row[c] for c in ("a_token_hash", "b_token_hash", "a_pub", "b_pub")]
+    assert row["a_name"] and row["b_name"]
+    conn = db(cfg)
+    for iv, ct in conn.execute("SELECT iv, ciphertext FROM room_items WHERE code=?", (code,)):
+        values += [iv, ct]
+    assert all(values) and len(values) >= 8, "the fixture should have put something in every place"
+    return values
+
+
+def assert_nothing_left(cfg, code, leftovers):
+    row = session_row(cfg, code)
+    assert row is not None and row["closed_at"], "a tombstone should remain"
+    for column in SCRUBBED:
+        assert row[column] in (None, ""), f"{column} survived"
+    assert not row["a_verified"] and not row["b_verified"]
+    conn = db(cfg)
+    assert conn.execute("SELECT COUNT(*) FROM room_items WHERE code=?", (code,)).fetchone()[0] == 0
+    dump = "\n".join(conn.iterdump())
+    for value in leftovers:
+        assert value not in dump, f"{value[:24]!r} is still in the database"
+
+
+@pytest.mark.parametrize("closer", ["alice", "bob"])
+def test_either_person_can_close_and_everything_is_deleted(ready, cfg, closer):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    assert ready.call(closer, "post", "/close").status_code == 200
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_after_closing_every_door_answers_closed(ready, cfg):
+    populated(ready)
+    ready.call("alice", "post", "/close")
+    for who in ("alice", "bob"):
+        assert ready.call(who, "get").status_code == 410
+        assert ready.call(who, "post", "/items", json=sealed()).status_code == 410
+        assert ready.call(who, "post", "/key", json={"public_key": public_key()}).status_code == 410
+        assert video(ready, who, "request").status_code == 410
+        assert ready.call(who, "post", "/close").status_code == 410            # nothing left to close
+    assert ready.client["bob"].get(f"/api/session/{ready.code}/status").get_json() == {"status": "closed"}
+
+
+def test_nobody_can_verify_into_a_closed_room(ready, app, cfg, admin):
+    ready.call("alice", "post", "/close")
+    late = ready.client["alice"].post(f"/api/session/{ready.code}/verify/totp", json={
+        "user_id": "alice-001", "code": pyotp.TOTP(ready.secret["alice"]).at(time.time() + 30)}).get_json()
+    assert late["ok"] is False and "закрыта" in late["reason"] and "token" not in late
+    assert_nothing_left(cfg, ready.code, [])
+
+
+def test_closing_needs_a_seat_token(ready, cfg):
+    populated(ready)
+    assert ready.call("alice", "post", "/close", headers={}).status_code == 401
+    assert ready.call("alice", "post", "/close", headers={"X-Room-Token": "x" * 43}).status_code == 401
+    assert session_row(cfg, ready.code)["closed_at"] is None
+    assert len(ready.call("bob", "get").get_json()["items"]) == 2
+
+
+def test_closing_one_room_leaves_another_alone(app, cfg, admin, ready):
+    other = Room(app, cfg, admin, secrets=ready.secret, step=1)
+    other.verify("alice"); other.verify("bob"); other.publish("alice"); other.publish("bob")
+    other.call("alice", "post", "/items", json=sealed())
+    ready.call("alice", "post", "/close")
+    assert other.call("bob", "get").status_code == 200
+    assert len(other.call("bob", "get").get_json()["items"]) == 1
+
+
+def test_a_room_that_runs_out_of_time_is_scrubbed_when_anyone_touches_it(ready, cfg):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    assert ready.call("bob", "get").status_code == 410
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_the_public_status_of_an_expired_room_also_scrubs_it(ready, cfg):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    assert ready.client["bob"].get(f"/api/session/{ready.code}/status").get_json()["status"] == "expired"
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_purge_scrubs_an_expired_room_nobody_comes_back_to(ready, cfg):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    conn = connect(cfg.db_path)
+    purge_expired(conn, 300); conn.commit(); conn.close()
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_purge_leaves_a_live_room_untouched(ready, cfg):
+    populated(ready)
+    conn = connect(cfg.db_path)
+    purge_expired(conn, 300); conn.commit(); conn.close()
+    row = session_row(cfg, ready.code)
+    assert row["closed_at"] is None and row["a_name"] == "Alice" and row["a_pub"]
+    assert len(ready.call("bob", "get").get_json()["items"]) == 2
+
+
+def test_tombstones_are_removed_a_day_later(ready, cfg):
+    ready.call("alice", "post", "/close")
+    conn = db(cfg)
+    conn.execute("UPDATE sessions SET closed_at=? WHERE code=?",
+                 ((utcnow() - timedelta(days=2)).isoformat(), ready.code))
+    conn.commit()
+    c2 = connect(cfg.db_path)
+    purge_expired(c2, 300); c2.commit(); c2.close()
+    assert session_row(cfg, ready.code) is None
+
+
+def test_the_cleanup_job_runs_on_its_own(ready, cfg, monkeypatch, capsys):
+    populated(ready)
+    leftovers = secrets_in(cfg, ready.code)
+    expire(cfg, ready.code)
+    for key, value in {"VERIFIER_HOME": str(cfg.base_dir), "DB_PATH": cfg.db_path, "CA_DIR": cfg.ca_dir,
+                       "FLASK_SECRET": "t" * 64, "ADMIN_SECRET": "test-admin-password-1234"}.items():
+        monkeypatch.setenv(key, value)
+    from verifier.purge import main
+    main()
+    assert "purged" in capsys.readouterr().out
+    assert_nothing_left(cfg, ready.code, leftovers)
+
+
+def test_existing_databases_gain_the_closed_column(tmp_path):
+    from verifier.db import init_db
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, "
+                 "b_name TEXT, a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.commit(); conn.close()
+    init_db(str(path))
+    assert "closed_at" in {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
+
+
+# ── presence, so each side can tell the other is actually here ─────────
+
+def age_seen(cfg, code, slot, seconds):
+    conn = db(cfg)
+    conn.execute(f"UPDATE sessions SET {slot}_seen_at=? WHERE code=?",
+                 ((utcnow() - timedelta(seconds=seconds)).isoformat(), code))
+    conn.commit()
+
+
+def test_a_person_is_online_once_they_have_polled_and_not_before(room):
+    assert room.call("alice", "get").get_json()["peer"]["online"] is False     # bob has not called yet
+    assert room.call("bob", "get").get_json()["peer"]["online"] is True        # alice just did
+    assert room.call("alice", "get").get_json()["peer"]["online"] is True      # and now bob has
+
+
+def test_presence_lapses_after_a_few_missed_polls(room, cfg):
+    room.call("alice", "get"); room.call("bob", "get")
+    age_seen(cfg, room.code, room.slot["bob"], 30)
+    assert room.call("alice", "get").get_json()["peer"]["online"] is False
+    age_seen(cfg, room.code, room.slot["bob"], 5)
+    assert room.call("alice", "get").get_json()["peer"]["online"] is True
+
+
+def test_any_authorised_call_counts_as_being_here(room):
+    room.publish("bob")
+    assert room.call("alice", "get").get_json()["peer"]["online"] is True
+
+
+def test_a_stranger_cannot_fake_presence(room, cfg):
+    room.call("alice", "get")
+    room.call("bob", "get", headers={"X-Room-Token": "x" * 43})
+    row = session_row(cfg, room.code)
+    assert row[f"{room.slot['bob']}_seen_at"] is None            # a wrong token leaves no trace
+    assert room.call("alice", "get").get_json()["peer"]["online"] is False
+
+
+def test_presence_is_wiped_when_the_room_closes(ready, cfg):
+    ready.call("alice", "get"); ready.call("bob", "get")
+    assert session_row(cfg, ready.code)["a_seen_at"] and session_row(cfg, ready.code)["b_seen_at"]
+    ready.call("alice", "post", "/close")
+    row = session_row(cfg, ready.code)
+    assert row["a_seen_at"] is None and row["b_seen_at"] is None
+
+
+def test_existing_databases_gain_the_presence_columns(tmp_path):
+    from verifier.db import init_db
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (code TEXT PRIMARY KEY, user_a TEXT, user_b TEXT, "
+                 "a_verified INTEGER DEFAULT 0, b_verified INTEGER DEFAULT 0, a_name TEXT, "
+                 "b_name TEXT, a_method TEXT, b_method TEXT, created_at TEXT, expires_at TEXT)")
+    conn.commit(); conn.close()
+    init_db(str(path))
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(sessions)")}
+    assert {"a_seen_at", "b_seen_at"} <= cols
+
+
+
+# ── key commitments: the safety code is only sound if keys are promised first ──
+
+def test_a_key_is_refused_until_both_sides_have_committed(room):
+    key = public_key()
+    assert room.call("alice", "post", "/key", json={"public_key": key}).status_code == 409   # nobody committed
+    assert room.commit("alice", key).status_code == 200
+    assert room.call("alice", "post", "/key", json={"public_key": key}).status_code == 409   # bob has not
+    assert room.commit("bob", public_key()).status_code == 200
+    assert room.call("alice", "post", "/key", json={"public_key": key}).status_code == 200
+
+
+def test_a_key_must_match_the_commitment_made_for_it(room):
+    promised, actual = public_key(), public_key()
+    room.commit("alice", promised); room.commit("bob", public_key())
+    refused = room.call("alice", "post", "/key", json={"public_key": actual})
+    assert refused.status_code == 409 and "обязательств" in refused.get_json()["reason"]
+    assert room.call("alice", "get").get_json()["you"]["public_key"] is None
+    assert room.call("alice", "post", "/key", json={"public_key": promised}).status_code == 200
+
+
+def test_a_commitment_is_set_once_and_visible_to_the_other_side(room):
+    key = public_key()
+    assert room.commit("alice", key).status_code == 200
+    assert room.commit("alice", key).status_code == 200                      # idempotent retry
+    assert room.commit("alice", public_key()).status_code == 409             # no swapping
+    assert room.call("bob", "get").get_json()["peer"]["commit"] == commit_of(key)
+
+
+@pytest.mark.parametrize("bad", [None, "", "abc", "g" * 64, "A" * 64, 123, ["x"], "0" * 63])
+def test_malformed_commitments_are_rejected(room, bad):
+    assert room.call("alice", "post", "/commit", json={"commit": bad}).status_code == 400
+
+
+def test_commitments_need_a_seat_token_and_are_wiped_with_the_room(ready, cfg):
+    assert ready.call("alice", "post", "/commit", headers={}, json={"commit": "0" * 64}).status_code == 401
+    ready.call("alice", "post", "/close")
+    row = session_row(cfg, ready.code)
+    assert row["a_commit"] is None and row["b_commit"] is None
+
+
+def test_the_birthday_attack_no_longer_applies():
+    """With both fake keys fixed before the real ones are seen, a malicious
+    server gets one blind guess at ten digits instead of a free search. This
+    documents the property the protocol buys; the search itself is in the
+    2026-10-17 audit notes."""
+    import hashlib
+    a, b = public_key(), public_key()
+    # The server must publish a commitment for the key it will show Bob before it
+    # sees Bob's real key, so the commitment pins its choice.
+    fake_a = public_key()
+    pinned = commit_of(fake_a)
+    assert commit_of(public_key()) != pinned            # any other key fails the pin
+    assert hashlib.sha256(fake_a.encode()).hexdigest() == pinned

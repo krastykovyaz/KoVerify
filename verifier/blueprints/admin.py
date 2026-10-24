@@ -2,6 +2,7 @@
 import base64
 import datetime as dt
 import secrets
+import time
 
 import pyotp
 from cryptography.hazmat.primitives import serialization
@@ -26,6 +27,12 @@ def _cfg():
     return current_app.config["VERIFIER"]
 
 
+def _valid_name(value):
+    # Names are rendered into pages, so refuse markup and control characters
+    # outright. Output is escaped as well; this is the second layer.
+    return not any(ch in "<>" or ord(ch) < 32 for ch in value)
+
+
 def _valid_user_id(value):
     if not value or len(value) > MAX_ID_LENGTH:
         return False
@@ -46,6 +53,7 @@ def admin_login():
         if constant_time_equals(supplied, cfg.admin_secret):
             session.clear()
             session["is_admin"] = True
+            session["admin_at"] = int(time.time())
             session.permanent = False
             clear_rate_limit("admin_login", client_ip())
             return redirect(url_for("admin.admin_panel"))
@@ -53,7 +61,7 @@ def admin_login():
     return render_template("admin_login.html", error=error)
 
 
-@bp.route("/logout", methods=["GET", "POST"])
+@bp.route("/logout", methods=["POST"])
 def admin_logout():
     session.clear()
     return redirect(url_for("admin.admin_login"))
@@ -86,6 +94,48 @@ def api_ca_cert():
     return send_file(_cfg().ca_cert_path, as_attachment=True, download_name="ca.crt")
 
 
+def _mint(cfg, user_id, name):
+    """Create a fresh key pair and certificate. Returns the pieces to store."""
+    ca_key, ca_cert = load_ca(cfg)
+    cert, user_key, serial_hex = issue_user_cert(cfg, ca_key, ca_cert, user_id, name)
+    p12_password = generate_p12_password()
+    p12_b64 = base64.b64encode(
+        build_p12(name, user_key, cert, ca_cert, p12_password)
+    ).decode()
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+    return cert_pem, serial_hex, p12_b64, p12_password
+
+
+def _new_download_link(conn, cfg, user_id, now):
+    token = secrets.token_urlsafe(32)
+    expires = now + dt.timedelta(hours=cfg.download_ttl_hours)
+    conn.execute(
+        "INSERT INTO download_tokens (token, user_id, created_at, expires_at) "
+        "VALUES (?,?,?,?)",
+        (token, user_id, now.isoformat(), expires.isoformat()),
+    )
+    return f"{request.host_url.rstrip('/')}/download/{token}"
+
+
+def _credentials_response(cfg, now, user_id, name, totp_secret, download_url,
+                          p12_password, cert_pem, serial_hex):
+    totp_uri = pyotp.TOTP(totp_secret).provisioning_uri(
+        name=name, issuer_name="Verifier")
+    return jsonify({
+        "ok": True,
+        "user_id": user_id,
+        "name": name,
+        "totp_secret": totp_secret,
+        "qr_totp_b64": qr_b64(totp_uri),
+        "download_url": download_url,
+        "qr_download_b64": qr_b64(download_url),
+        "p12_password": p12_password,
+        "cert_pem": cert_pem,
+        "serial": serial_hex,
+        "valid_until": (now + dt.timedelta(days=cfg.cert_valid_days)).strftime("%d.%m.%Y"),
+    })
+
+
 @bp.route("/api/register", methods=["POST"])
 @admin_required
 def api_register():
@@ -100,6 +150,8 @@ def api_register():
         return jsonify({"ok": False, "reason": "ID: только буквы, цифры, - и _"})
     if len(name) > MAX_NAME_LENGTH:
         return jsonify({"ok": False, "reason": "слишком длинное имя"})
+    if not _valid_name(name):
+        return jsonify({"ok": False, "reason": "имя не должно содержать < > и управляющих символов"})
     if not ca_exists(cfg):
         return jsonify({"ok": False, "reason": "Сначала создайте CA"})
 
@@ -107,50 +159,52 @@ def api_register():
     if conn.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
         return jsonify({"ok": False, "reason": f"{user_id} уже существует"})
 
-    ca_key, ca_cert = load_ca(cfg)
     totp_secret = pyotp.random_base32()
-    totp_uri = pyotp.TOTP(totp_secret).provisioning_uri(
-        name=name, issuer_name="Verifier")
-
-    cert, user_key, serial_hex = issue_user_cert(cfg, ca_key, ca_cert, user_id, name)
-    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
-
-    p12_password = generate_p12_password()
-    p12_b64 = base64.b64encode(
-        build_p12(name, user_key, cert, ca_cert, p12_password)
-    ).decode()
-
-    dl_token = secrets.token_urlsafe(32)
+    cert_pem, serial_hex, p12_b64, p12_password = _mint(cfg, user_id, name)
     now = utcnow()
-    expires = now + dt.timedelta(hours=cfg.download_ttl_hours)
-
     conn.execute(
         "INSERT INTO users (id, name, totp_secret, cert_pem, serial, p12_b64, created_at) "
         "VALUES (?,?,?,?,?,?,?)",
         (user_id, name, totp_secret, cert_pem, serial_hex, p12_b64, now.isoformat()),
     )
-    conn.execute(
-        "INSERT INTO download_tokens (token, user_id, created_at, expires_at) "
-        "VALUES (?,?,?,?)",
-        (dl_token, user_id, now.isoformat(), expires.isoformat()),
-    )
+    download_url = _new_download_link(conn, cfg, user_id, now)
     conn.commit()
+    return _credentials_response(cfg, now, user_id, name, totp_secret,
+                                 download_url, p12_password, cert_pem, serial_hex)
 
-    base_url = request.host_url.rstrip("/")
-    download_url = f"{base_url}/download/{dl_token}"
-    return jsonify({
-        "ok": True,
-        "user_id": user_id,
-        "name": name,
-        "totp_secret": totp_secret,
-        "qr_totp_b64": qr_b64(totp_uri),
-        "download_url": download_url,
-        "qr_download_b64": qr_b64(download_url),
-        "p12_password": p12_password,
-        "cert_pem": cert_pem,
-        "serial": serial_hex,
-        "valid_until": (now + dt.timedelta(days=cfg.cert_valid_days)).strftime("%d.%m.%Y"),
-    })
+
+@bp.route("/api/reissue", methods=["POST"])
+@admin_required
+def api_reissue():
+    """New key pair for an existing person.
+
+    Needed when a delivery failed (the server wipes the key once the one-time
+    link is spent) or a device was lost. The old certificate stops working at
+    once because login matches on the stored serial number.
+    """
+    cfg = _cfg()
+    user_id = str((request.get_json(silent=True) or {}).get("user_id", "")).strip()
+    if not ca_exists(cfg):
+        return jsonify({"ok": False, "reason": "Сначала создайте CA"})
+
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        return jsonify({"ok": False, "reason": "пользователь не найден"}), 404
+    if user["revoked"]:
+        return jsonify({"ok": False, "reason": "пользователь отозван, сначала восстановите"})
+
+    cert_pem, serial_hex, p12_b64, p12_password = _mint(cfg, user_id, user["name"])
+    now = utcnow()
+    conn.execute(
+        "UPDATE users SET cert_pem=?, serial=?, p12_b64=? WHERE id=?",
+        (cert_pem, serial_hex, p12_b64, user_id),
+    )
+    conn.execute("UPDATE download_tokens SET used=1 WHERE user_id=?", (user_id,))
+    download_url = _new_download_link(conn, cfg, user_id, now)
+    conn.commit()
+    return _credentials_response(cfg, now, user_id, user["name"], user["totp_secret"],
+                                 download_url, p12_password, cert_pem, serial_hex)
 
 
 @bp.route("/api/user/<user_id>")

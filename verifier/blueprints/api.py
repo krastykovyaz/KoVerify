@@ -3,14 +3,14 @@ import base64
 import datetime as dt
 import secrets
 
-import pyotp
 from flask import Blueprint, current_app, jsonify, request
 
 from ..ca import load_ca_cert
 from ..certs import CertError, authenticate_by_challenge, lookup_user
-from ..db import get_db, parse_ts, purge_expired, utcnow
+from ..db import close_room, get_db, parse_ts, purge_expired, utcnow
 from ..mtls import authenticated_client_cert
-from ..security import client_ip, rate_limit
+from ..security import client_ip, hash_token, rate_limit
+from ..totp import match_step
 
 bp = Blueprint("api", __name__)
 
@@ -50,6 +50,21 @@ def _session_expired(row):
     return expires is not None and utcnow() > expires
 
 
+def _gone(conn, row):
+    """A response when the session can no longer be used, else None.
+
+    An expired room is finished off here the moment anyone touches it, so it
+    never depends on the cleanup job having run.
+    """
+    if _session_expired(row):
+        close_room(conn, row["code"], _cfg().proofs_dir)
+        conn.commit()
+        return jsonify({"ok": False, "reason": "сессия истекла"})
+    if row["closed_at"]:
+        return jsonify({"ok": False, "reason": "сессия закрыта"})
+    return None
+
+
 def record_verification(conn, code, user_id, name, method):
     """Claim a free slot for this user atomically.
 
@@ -83,6 +98,25 @@ def record_verification(conn, code, user_id, name, method):
     return None
 
 
+def claim_slot(conn, code, user_id, name, method):
+    """Claim a slot and issue the credential that proves which side this is.
+
+    Without it anyone who learned the eight-character code could read the room.
+    Only a hash is stored; the token itself is returned once, to the browser
+    that just passed verification.
+    """
+    slot = record_verification(conn, code, user_id, name, method)
+    if slot is None:
+        return None, None
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        f"UPDATE sessions SET {slot}_token_hash=? WHERE code=?",
+        (hash_token(token), code),
+    )
+    conn.commit()
+    return slot, token
+
+
 @bp.route("/api/session/create", methods=["POST"])
 def create_session():
     cfg = _cfg()
@@ -91,7 +125,7 @@ def create_session():
         return _too_many(retry)
 
     conn = get_db()
-    purge_expired(conn, cfg.nonce_ttl_seconds)
+    purge_expired(conn, cfg.nonce_ttl_seconds, cfg.proofs_dir)
     now = utcnow()
     expires = now + dt.timedelta(minutes=cfg.session_ttl_minutes)
     for _ in range(5):
@@ -124,8 +158,13 @@ def session_status(code):
     row = _load_session(get_db(), code)
     if not row:
         return jsonify({"error": "не найдено"}), 404
+    conn = get_db()
     if _session_expired(row):
+        close_room(conn, code, cfg.proofs_dir)
+        conn.commit()
         return jsonify({"status": "expired"})
+    if row["closed_at"]:
+        return jsonify({"status": "closed"})
     both = bool(row["a_verified"] and row["b_verified"])
     return jsonify({
         "status": "both_verified" if both else "pending",
@@ -144,7 +183,7 @@ def get_nonce():
         return _too_many(retry)
 
     conn = get_db()
-    purge_expired(conn, cfg.nonce_ttl_seconds)
+    purge_expired(conn, cfg.nonce_ttl_seconds, cfg.proofs_dir)
     nonce = secrets.token_hex(32)
     conn.execute(
         "INSERT INTO nonces VALUES (?,?)", (nonce, utcnow().isoformat())
@@ -168,8 +207,9 @@ def verify_totp(code):
     row = _load_session(conn, code)
     if not row:
         return jsonify({"ok": False, "reason": "сессия не найдена"}), 404
-    if _session_expired(row):
-        return jsonify({"ok": False, "reason": "сессия истекла"})
+    gone = _gone(conn, row)
+    if gone:
+        return gone
 
     user = conn.execute(
         "SELECT * FROM users WHERE id=? AND revoked=0", (user_id,)
@@ -177,13 +217,25 @@ def verify_totp(code):
     # One message for both cases, so the endpoint cannot be used to enumerate IDs.
     if not user or not user["totp_secret"] or not otp:
         return jsonify({"ok": False, "reason": "неверный ID или код"})
-    if not pyotp.TOTP(user["totp_secret"]).verify(otp, valid_window=1):
+    step = match_step(user["totp_secret"], otp)
+    if step is None:
         return jsonify({"ok": False, "reason": "неверный ID или код"})
+    # A code is good once. The UPDATE carries the precondition, so two requests
+    # replaying the same code cannot both pass.
+    claimed = conn.execute(
+        "UPDATE users SET totp_last_step=? WHERE id=? "
+        "AND (totp_last_step IS NULL OR totp_last_step < ?)",
+        (step, user_id, step),
+    )
+    conn.commit()
+    if claimed.rowcount != 1:
+        return jsonify({"ok": False,
+                        "reason": "этот код уже использован, дождитесь следующего"})
 
-    slot = record_verification(conn, code, user_id, user["name"], "TOTP")
+    slot, token = claim_slot(conn, code, user_id, user["name"], "TOTP")
     if slot is None:
         return jsonify({"ok": False, "reason": "уже верифицированы или мест нет"})
-    return jsonify({"ok": True, "name": user["name"], "slot": slot})
+    return jsonify({"ok": True, "name": user["name"], "slot": slot, "token": token})
 
 
 @bp.route("/api/session/<code>/verify/cert", methods=["POST"])
@@ -204,8 +256,9 @@ def verify_cert(code):
     row = _load_session(conn, code)
     if not row:
         return jsonify({"ok": False, "reason": "сессия не найдена"}), 404
-    if _session_expired(row):
-        return jsonify({"ok": False, "reason": "сессия истекла"})
+    gone = _gone(conn, row)
+    if gone:
+        return gone
 
     try:
         signature = base64.b64decode(signature_b64 or "", validate=True)
@@ -219,10 +272,10 @@ def verify_cert(code):
     except CertError as exc:
         return jsonify({"ok": False, "reason": str(exc)})
 
-    slot = record_verification(conn, code, user["id"], user["name"], "Сертификат")
+    slot, token = claim_slot(conn, code, user["id"], user["name"], "Сертификат")
     if slot is None:
         return jsonify({"ok": False, "reason": "уже верифицированы или мест нет"})
-    return jsonify({"ok": True, "name": user["name"], "slot": slot})
+    return jsonify({"ok": True, "name": user["name"], "slot": slot, "token": token})
 
 
 @bp.route("/api/session/<code>/verify/mtls", methods=["POST"])
@@ -237,8 +290,9 @@ def verify_mtls(code):
     row = _load_session(conn, code)
     if not row:
         return jsonify({"ok": False, "reason": "сессия не найдена"}), 404
-    if _session_expired(row):
-        return jsonify({"ok": False, "reason": "сессия истекла"})
+    gone = _gone(conn, row)
+    if gone:
+        return gone
 
     try:
         cert = authenticated_client_cert(cfg, load_ca_cert(cfg))
@@ -250,7 +304,8 @@ def verify_mtls(code):
             "hint": "убедитесь что HTTPS включён и сертификат установлен на устройстве",
         })
 
-    slot = record_verification(conn, code, user["id"], user["name"], "mTLS (авто)")
+    slot, token = claim_slot(conn, code, user["id"], user["name"], "mTLS (авто)")
     if slot is None:
         return jsonify({"ok": False, "reason": "уже верифицированы в этой сессии"})
-    return jsonify({"ok": True, "name": user["name"], "method": "mtls", "slot": slot})
+    return jsonify({"ok": True, "name": user["name"], "method": "mtls", "slot": slot,
+                    "token": token})

@@ -25,6 +25,21 @@ def test_p12_link_is_single_use(client, user):
     assert second.status_code == 410
 
 
+def test_p12_is_served_as_an_attachment(client, user):
+    """Android/macOS/Windows instructions all say to open a downloaded file."""
+    response = client.get(f"/download/{user.token}/p12")
+    assert "attachment" in response.headers.get("Content-Disposition", "")
+
+
+def test_mobileconfig_is_served_inline_not_as_attachment(client, user):
+    """iOS Safari only offers the install-profile prompt for an inline
+    response; as an attachment it silently lands in Files with no prompt,
+    which looks like the download button does nothing."""
+    response = client.get(f"/download/{user.token}/mobileconfig")
+    disposition = response.headers.get("Content-Disposition", "")
+    assert "attachment" not in disposition
+
+
 def test_mobileconfig_link_is_single_use(client, user):
     """This route previously ignored the used flag entirely."""
     first = client.get(f"/download/{user.token}/mobileconfig")

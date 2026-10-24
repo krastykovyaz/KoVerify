@@ -243,7 +243,7 @@
   <h1>🔐 Панель управления верификатором</h1>
   <div class="topbar-actions">
     <a href="/" style="color:#666;font-size:.82rem;text-decoration:none">← Сайт</a>
-    <a href="/admin/logout"><button class="btn btn-logout">Выйти</button></a>
+    <form method="post" action="/admin/logout" style="display:inline"><button class="btn btn-logout" type="submit">Выйти</button></form>
   </div>
 </div>
 
@@ -319,6 +319,10 @@
         <div class="user-actions">
           <button class="btn btn-sm btn-ghost"
                   onclick="showUser('{{ u.id }}')">👁 Ключи</button>
+          {% if not u.revoked %}
+          <button class="btn btn-sm btn-ghost" title="Выпустить новые ключи"
+                  onclick="reissue('{{ u.id }}')">🔄</button>
+          {% endif %}
           {% if u.revoked %}
           <button class="btn btn-sm btn-restore"
                   onclick="toggleRevoke('{{ u.id }}', false)">↩</button>
@@ -354,7 +358,7 @@
         <div class="qr-wrap" style="margin-bottom:10px">
           <img id="modal-qr-download" src="" alt="QR для скачивания" style="width:180px;height:180px">
         </div>
-        <div style="font-size:.75rem;color:#4ade80;word-break:break-all" id="modal-download-url"></div>
+        <a href="#" target="_blank" rel="noopener" style="font-size:.75rem;color:#4ade80;word-break:break-all" id="modal-download-url"></a>
       </div>
 
       <!-- P12 пароль — называете устно -->
@@ -364,7 +368,7 @@
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           <span id="modal-p12-password" style="font-family:monospace;font-size:1.4rem;font-weight:700;color:#fcd34d;letter-spacing:4px"></span>
-          <button class="copy-btn" style="position:static" onclick="copyText('modal-p12-password')">копировать</button>
+          <button class="copy-btn" style="position:static" onclick="copyText('modal-p12-password', this)">копировать</button>
         </div>
       </div>
       <div style="font-size:.75rem;color:#666;margin-bottom:4px">
@@ -400,6 +404,22 @@
 
 <script>
   let currentUser = null
+
+  // Anything that came from a person's name or id goes through this before it
+  // is placed in markup.
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, ch => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ))
+  }
+
+  async function reissue(userId) {
+    if (!confirm('Выпустить новые ключи? Старый сертификат сразу перестанет работать.')) return
+    const r = await post('/admin/api/reissue', { user_id: userId })
+    if (!r.ok) { alert('Ошибка: ' + r.reason); return }
+    currentUser = r
+    openModal(r, true)
+  }
 
   // ── CA ───────────────────────────────────────────────────
 
@@ -456,7 +476,9 @@
       dlSection.style.display = 'block'
       document.getElementById('modal-qr-download').src =
         `data:image/png;base64,${data.qr_download_b64}`
-      document.getElementById('modal-download-url').textContent = data.download_url
+      const dlLink = document.getElementById('modal-download-url')
+      dlLink.href = data.download_url
+      dlLink.textContent = data.download_url
       document.getElementById('modal-p12-password').textContent = data.p12_password || '—'
     } else {
       dlSection.style.display = 'none'
@@ -526,14 +548,15 @@
     div.className = 'user-row'
     div.id = `row-${data.user_id}`
     div.innerHTML = `
-      <div class="user-avatar">${data.name[0].toUpperCase()}</div>
+      <div class="user-avatar">${esc(data.name[0].toUpperCase())}</div>
       <div class="user-info">
-        <div class="user-name">${data.name}</div>
-        <div class="user-id">${data.user_id}</div>
+        <div class="user-name">${esc(data.name)}</div>
+        <div class="user-id">${esc(data.user_id)}</div>
         <div class="user-meta">TOTP: ✓ &nbsp; Cert: ✓ &nbsp; только что</div>
       </div>
       <div class="user-actions">
-        <button class="btn btn-sm btn-ghost" onclick="showUser('${data.user_id}')">👁 Ключи</button>
+        <button class="btn btn-sm btn-ghost" onclick="showUser('${esc(data.user_id)}')">👁 Ключи</button>
+        <button class="btn btn-sm btn-ghost" title="Выпустить новые ключи" onclick="reissue('${esc(data.user_id)}')">🔄</button>
         <button class="btn btn-sm btn-danger" onclick="toggleRevoke('${data.user_id}', true)">✕</button>
       </div>
     `
@@ -542,11 +565,11 @@
 
   // ── Copy helpers ─────────────────────────────────────────
 
-  function copyText(id) {
+  function copyText(id, button) {
     const text = document.getElementById(id).textContent.trim()
     navigator.clipboard.writeText(text)
-    event.target.textContent = '✓'
-    setTimeout(() => event.target.textContent = 'копировать', 1500)
+    button.textContent = '✓'
+    setTimeout(() => button.textContent = 'копировать', 1500)
   }
 
   function copyEl(id) {

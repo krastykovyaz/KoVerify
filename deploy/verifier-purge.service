@@ -1,0 +1,20 @@
+[Unit]
+Description=Delete verifier rooms that have ended
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/verifier
+EnvironmentFile=/etc/verifier.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/var/www/verifier/venv/bin/python -m verifier.purge
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/verifier
+ReadOnlyPaths=/var/www/verifier/verifier /var/www/verifier/templates /var/www/verifier/venv
+UMask=0077
